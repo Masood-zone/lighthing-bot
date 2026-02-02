@@ -193,6 +193,7 @@ export default function UsersPage() {
                 <TableHead>Email</TableHead>
                 <TableHead>Name</TableHead>
                 <TableHead>Timeline</TableHead>
+                <TableHead>Reschedule</TableHead>
                 {/* <TableHead>Status</TableHead> */}
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
@@ -204,6 +205,13 @@ export default function UsersPage() {
                   <TableCell>{getUserDisplayName(u)}</TableCell>
                   <TableCell>
                     <TimelineCell user={u} />
+                  </TableCell>
+                  <TableCell>
+                    {u.config?.reschedule ? (
+                      <Badge variant="secondary">Yes</Badge>
+                    ) : (
+                      <Badge variant="outline">No</Badge>
+                    )}
                   </TableCell>
                   {/* <TableCell>{statusBadge(u.status)}</TableCell> */}
                   <TableCell className="text-right">

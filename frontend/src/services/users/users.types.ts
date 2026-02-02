@@ -30,6 +30,7 @@ export type BotUser = {
     displayName: string;
     pickupPoint: string;
     headless: boolean;
+    reschedule?: boolean;
     passwordSet: boolean;
 
     // Optional appointment date preferences
@@ -58,6 +59,7 @@ export type CreateUserInput = {
   displayName: string;
   pickupPoint?: string;
   headless?: boolean;
+  reschedule?: boolean;
 
   // Optional appointment date preferences
   dateStart?: string | null;

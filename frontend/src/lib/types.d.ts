@@ -16,6 +16,7 @@ interface BasicUser {
   displayName: string;
   pickupPoint: string;
   headless: boolean;
+  reschedule?: boolean;
 }
 
 interface AuthenticatedUser {
@@ -46,6 +47,7 @@ interface BotConfig {
   displayName: string;
   pickupPoint: string;
   headless: boolean;
+  reschedule?: boolean;
   passwordSet: boolean;
 }
 

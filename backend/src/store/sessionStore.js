@@ -170,6 +170,7 @@ class SessionStore {
         displayName: input.displayName,
         pickupPoint: input.pickupPoint,
         headless: Boolean(input.headless),
+        reschedule: Boolean(input.reschedule),
         // Optional appointment date preferences
         // - dateStart/dateEnd: YYYY-MM-DD (inclusive)
         // - daysFromNowMin/daysFromNowMax: inclusive window relative to today
@@ -217,6 +218,9 @@ class SessionStore {
     }
     if (Object.prototype.hasOwnProperty.call(patch, "headless")) {
       cfg.headless = Boolean(patch.headless);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "reschedule")) {
+      cfg.reschedule = Boolean(patch.reschedule);
     }
 
     if (Object.prototype.hasOwnProperty.call(patch, "dateStart")) {

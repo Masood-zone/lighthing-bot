@@ -172,6 +172,7 @@ class WorkerPool {
       VISA_PICKUP_POINT: session.config.pickupPoint,
       VISA_HEADLESS: session.config.headless ? "1" : "0",
       VISA_PROFILE_DIR: profileDir,
+      VISA_RESCHEDULE: session.config.reschedule ? "1" : "0",
 
       // Optional appointment date preferences (all optional)
       VISA_DATE_START: session.config.dateStart || "",

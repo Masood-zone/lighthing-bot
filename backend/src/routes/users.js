@@ -5,6 +5,7 @@ const fs = require("node:fs");
 function sanitizeUser(sessionLike) {
   if (!sessionLike) return sessionLike;
   const cfg = { ...(sessionLike.config || {}) };
+  cfg.reschedule = Boolean(cfg.reschedule);
   const passwordSet = Boolean(cfg.passwordEnc || cfg.password);
   delete cfg.password;
   delete cfg.passwordEnc;
@@ -149,7 +150,10 @@ function createUsersRouter({ store, pool, baseDir }) {
       displayName,
       pickupPoint = "Accra",
       headless = false,
+      reschedule,
     } = req.body || {};
+
+    const rescheduleBool = reschedule === undefined ? false : reschedule;
 
     const {
       dateStart,
@@ -171,6 +175,9 @@ function createUsersRouter({ store, pool, baseDir }) {
     }
     if (!displayName || typeof displayName !== "string") {
       return res.status(400).json({ error: "displayName_required" });
+    }
+    if (rescheduleBool !== undefined && typeof rescheduleBool !== "boolean") {
+      return res.status(400).json({ error: "reschedule_invalid" });
     }
 
     if (dateStart === "__invalid__") {
@@ -231,6 +238,7 @@ function createUsersRouter({ store, pool, baseDir }) {
         displayName,
         pickupPoint,
         headless,
+        reschedule: rescheduleBool,
         dateStart,
         dateEnd,
         daysFromNowMin,
@@ -266,8 +274,15 @@ function createUsersRouter({ store, pool, baseDir }) {
       });
     }
 
-    const { loginUrl, email, password, displayName, pickupPoint, headless } =
-      req.body || {};
+    const {
+      loginUrl,
+      email,
+      password,
+      displayName,
+      pickupPoint,
+      headless,
+      reschedule,
+    } = req.body || {};
 
     const {
       dateStart,
@@ -298,6 +313,9 @@ function createUsersRouter({ store, pool, baseDir }) {
       (typeof pickupPoint !== "string" || !pickupPoint)
     ) {
       return res.status(400).json({ error: "pickupPoint_invalid" });
+    }
+    if (reschedule !== undefined && typeof reschedule !== "boolean") {
+      return res.status(400).json({ error: "reschedule_invalid" });
     }
 
     if (dateStart === "__invalid__") {
@@ -359,6 +377,7 @@ function createUsersRouter({ store, pool, baseDir }) {
         ...(displayName !== undefined ? { displayName } : null),
         ...(pickupPoint !== undefined ? { pickupPoint } : null),
         ...(headless !== undefined ? { headless } : null),
+        ...(reschedule !== undefined ? { reschedule } : null),
         ...(dateStart !== undefined ? { dateStart } : null),
         ...(dateEnd !== undefined ? { dateEnd } : null),
         ...(daysFromNowMin !== undefined ? { daysFromNowMin } : null),

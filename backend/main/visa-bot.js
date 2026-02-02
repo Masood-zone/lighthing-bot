@@ -21,6 +21,9 @@ const CONFIG = {
   SESSION_ID: process.env.VISA_SESSION_ID || "",
   HEADLESS:
     process.env.VISA_HEADLESS === "1" || process.env.VISA_HEADLESS === "true",
+  RESCHEDULE:
+    process.env.VISA_RESCHEDULE === "1" ||
+    process.env.VISA_RESCHEDULE === "true",
 
   // Business rule: attempt booking checks every 2 seconds for 1 hour.
   // Defaults: 2s cadence, 1h window, 1800 attempts per window.
@@ -668,20 +671,56 @@ async function fastBookingAttempt(driver) {
     }
 
     reportStatus("SLOT", "Clicking first available time slot");
-    const slotOk = await clickFirstTimeSlot(driver);
-    if (!slotOk) {
-      reportStatus("SLOT_MISSING", "No time slot clickable; resetting pickup");
-      return "RESET_PICKUP";
+    const slotOkStage1 = await clickFirstTimeSlot(driver);
+    if (!slotOkStage1) {
+      reportStatus(
+        "SLOT_MISSING_STAGE1",
+        "No time slot clickable before proceed; will try proceed and re-scan",
+      );
     }
 
     reportStatus("PROCEED", "Clicking SELECT POST AND PROCEED");
-    const proceedOk = await clickProceedButton(driver).catch(() => false);
-    if (!proceedOk) {
+    const proceedOkStage1 = await clickProceedButton(driver).catch(() => false);
+    if (!proceedOkStage1) {
       reportStatus(
         "PROCEED_MISSING",
         "Proceed button not clickable/visible; resetting pickup",
       );
       return "RESET_PICKUP";
+    }
+
+    // Some flows show the time-slot list only AFTER clicking proceed.
+    // User requirement: if a list of time buttons appears after proceed, click one.
+    reportStatus("OVERLAY", "Waiting for loading overlay after proceed");
+    await waitForLoadingOverlayToClear(driver, 15_000).catch(() => true);
+    await dismissAnyOpenOverlays(driver).catch(() => {});
+
+    reportStatus("SLOT_STAGE2", "Scanning for time slot buttons after proceed");
+    const slotOkStage2 = await clickFirstAvailableTimeSlot(driver, 6000);
+    if (slotOkStage2) {
+      reportStatus(
+        "SLOT_SELECTED_STAGE2",
+        "Selected a time slot after proceed",
+      );
+
+      // If the same proceed button is still present, click it again to continue.
+      const proceedOkStage2 = await clickProceedButton(driver).catch(
+        () => false,
+      );
+      if (proceedOkStage2) {
+        reportStatus("PROCEED_STAGE2", "Clicked proceed after slot selection");
+        await waitForLoadingOverlayToClear(driver, 15_000).catch(() => true);
+      } else {
+        reportStatus(
+          "PROCEED_STAGE2_MISSING",
+          "Proceed button not found after slot selection; continuing",
+        );
+      }
+    } else {
+      reportStatus(
+        "SLOT_STAGE2_NONE",
+        "No post-proceed time-slot list detected (ok)",
+      );
     }
 
     reportStatus("SUCCESS", "Success");
@@ -1020,48 +1059,168 @@ async function trySelectFirstAvailableDateFast(driver) {
 async function clickFirstAvailableTimeSlot(driver, timeoutMs = 2500) {
   const start = Date.now();
 
-  // Slot buttons typically contain AM/PM. We keep this broad but scoped to the booking block.
+  // User requirement: Do NOT scope to `.ofc-book-slot-block`.
+  // Time slots can appear as a list of clickable green buttons/links anywhere on the page.
+
+  const looksLikeTimeText = (txt) => {
+    const t = String(txt || "").trim();
+    if (!t) return false;
+    // Examples: "3:30 PM", "03:30PM", "15:30", "3 PM"
+    return (
+      /\b\d{1,2}:\d{2}\s*(AM|PM)?\b/i.test(t) ||
+      /\b\d{1,2}\s*(AM|PM)\b/i.test(t)
+    );
+  };
+
+  async function isEnabledClickable(el) {
+    try {
+      const disabledAttr = await el.getAttribute("disabled");
+      const ariaDisabled = await el.getAttribute("aria-disabled");
+      if (disabledAttr || ariaDisabled === "true") return false;
+    } catch {
+      // ignore
+    }
+    try {
+      if (!(await el.isDisplayed())) return false;
+    } catch {
+      // ignore
+    }
+    return true;
+  }
+
+  async function isGreenButton(el) {
+    const colors = [];
+    try {
+      colors.push(await el.getCssValue("background-color"));
+    } catch {
+      // ignore
+    }
+
+    // Common Angular Material wrappers.
+    try {
+      const wrapper = await el.findElement(By.css(".mat-button-wrapper"));
+      colors.push(await wrapper.getCssValue("background-color"));
+    } catch {
+      // ignore
+    }
+
+    try {
+      const span = await el.findElement(By.css("span"));
+      colors.push(await span.getCssValue("background-color"));
+    } catch {
+      // ignore
+    }
+
+    return colors.some((c) => isGreenAvailableColor(c));
+  }
+
+  async function isSelectedSlot(el) {
+    try {
+      const cls = String((await el.getAttribute("class")) || "");
+      if (cls.includes("selected-slot")) return true;
+    } catch {
+      // ignore
+    }
+
+    // Visual fallback: once selected, the slot turns gray (per user).
+    // We accept any non-green, non-transparent background as a selection signal.
+    try {
+      const bg = await el.getCssValue("background-color");
+      const rgb = normalizeRgb(bg);
+      if (!rgb) return false;
+      if (rgb.a === 0) return false;
+      if (isGreenAvailableColor(bg)) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   while (Date.now() - start < timeoutMs) {
+    // Prefer the known slots container when present (real DOM):
+    // .ofc-appoinment-sloat-block .booking-time-buttons.slot_calender button.green-button
+    // but do not require `.ofc-book-slot-block`.
     // eslint-disable-next-line no-await-in-loop
-    const bookingBlock = await driver
-      .findElement(By.css(".ofc-book-slot-block"))
-      .catch(() => null);
+    const slotButtonsPreferred = await driver
+      .findElements(
+        By.css(
+          ".ofc-appoinment-sloat-block .booking-time-buttons.slot_calender button.green-button, .booking-time-buttons.slot_calender button.green-button",
+        ),
+      )
+      .catch(() => []);
 
-    if (bookingBlock) {
-      // eslint-disable-next-line no-await-in-loop
-      const buttons = await bookingBlock.findElements(By.css("button"));
-      for (const btn of buttons) {
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          const txt = ((await btn.getText()) || "").trim();
-          if (!txt) continue;
-          if (!/(^|\s)(AM|PM)(\s|$)/i.test(txt)) continue;
+    // Fallback: search broadly for clickable elements with time-ish text.
+    // eslint-disable-next-line no-await-in-loop
+    const candidates =
+      slotButtonsPreferred.length > 0
+        ? slotButtonsPreferred
+        : await driver
+            .findElements(
+              By.xpath(
+                "//button[contains(normalize-space(.), ':') or contains(translate(normalize-space(.),'amp','AMP'),'AM') or contains(translate(normalize-space(.),'amp','AMP'),'PM')] | //a[contains(normalize-space(.), ':') or contains(translate(normalize-space(.),'amp','AMP'),'AM') or contains(translate(normalize-space(.),'amp','AMP'),'PM')] | //*[@role='button' and (contains(normalize-space(.), ':') or contains(translate(normalize-space(.),'amp','AMP'),'AM') or contains(translate(normalize-space(.),'amp','AMP'),'PM'))]",
+              ),
+            )
+            .catch(() => []);
 
-          // eslint-disable-next-line no-await-in-loop
-          const disabledAttr = await btn.getAttribute("disabled");
-          // eslint-disable-next-line no-await-in-loop
-          const ariaDisabled = await btn.getAttribute("aria-disabled");
-          if (disabledAttr || ariaDisabled === "true") continue;
+    const green = [];
+    const anyTime = [];
 
-          // eslint-disable-next-line no-await-in-loop
-          await driver.executeScript(
-            "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
-            btn,
+    for (const el of candidates) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const txt = ((await el.getText()) || "").trim();
+        if (!looksLikeTimeText(txt)) continue;
+
+        // eslint-disable-next-line no-await-in-loop
+        if (!(await isEnabledClickable(el))) continue;
+
+        // eslint-disable-next-line no-await-in-loop
+        const isGreen = await isGreenButton(el);
+        if (isGreen) green.push({ el, txt });
+        else anyTime.push({ el, txt });
+      } catch {
+        // ignore and continue
+      }
+    }
+
+    const pick =
+      green.length > 0 ? green[0] : anyTime.length > 0 ? anyTime[0] : null;
+    if (pick) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await driver.executeScript(
+          "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+          pick.el,
+        );
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(150);
+        // eslint-disable-next-line no-await-in-loop
+        await safeClick(driver, pick.el);
+
+        // Confirm selection: slot becomes gray or receives `selected-slot`.
+        // eslint-disable-next-line no-await-in-loop
+        const selected = await driver
+          .wait(async () => isSelectedSlot(pick.el), 2500)
+          .catch(() => false);
+        if (!selected) {
+          reportStatus(
+            "SLOT_CLICK_NO_CONFIRM",
+            `Clicked time slot but selection not confirmed yet: ${pick.txt}`,
           );
-          // eslint-disable-next-line no-await-in-loop
-          await sleep(150);
-          // eslint-disable-next-line no-await-in-loop
-          await jsClick(driver, btn);
-          reportStatus("SLOT_SELECTED", `Time slot selected: ${txt}`);
-          return true;
-        } catch {
-          // ignore and continue
         }
+
+        reportStatus(
+          "SLOT_SELECTED",
+          `Time slot selected: ${pick.txt}${green.length > 0 ? " (green)" : ""}`,
+        );
+        return true;
+      } catch {
+        // ignore and retry within timeout
       }
     }
 
     // eslint-disable-next-line no-await-in-loop
-    await sleep(200);
+    await sleep(250);
   }
 
   return false;
@@ -1074,7 +1233,7 @@ async function proceedIfAvailableSlotsVisible(driver) {
     .wait(
       until.elementLocated(
         By.xpath(
-          "//button[contains(normalize-space(.), 'SELECT POST') and contains(normalize-space(.), 'PROCEED')]",
+          "//button[(contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'SELECT POST') and contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'PROCEED')) or (contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'BOOK') and contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'POST') and contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'APPOINTMENT'))]",
         ),
       ),
       12_000,
@@ -1085,7 +1244,7 @@ async function proceedIfAvailableSlotsVisible(driver) {
 
   await driver.wait(until.elementIsVisible(proceedBtn), 5000).catch(() => {});
   await jsClick(driver, proceedBtn);
-  reportStatus("DATE_SELECTED", "Date selected; proceeded to next step");
+  reportStatus("PROCEEDED", "Proceeded to next step (SELECT/BOOK POST)");
   return true;
 }
 // Login flow to fill in credentials and wait for user to complete CAPTCHA.
@@ -1182,7 +1341,7 @@ async function goToPendingAppointment(
     return true;
   }
 
-  // Navigation can end up on /appointment after refresh/keepalive; in that case
+  // Navigation can end up on /appointment after keepalive/navigation; in that case
   // we still want to reset state by going dashboard -> appointment.
   await goToDashboard(driver);
 
@@ -1288,8 +1447,148 @@ async function goToPendingAppointment(
   return true;
 }
 
+async function goToRescheduleAppointment(
+  driver,
+  { forceFromDashboard = false } = {},
+) {
+  const url = await driver.getCurrentUrl();
+  if (!forceFromDashboard && url.includes("/appointment")) {
+    console.log("Already on appointment page.");
+    reportStatus("APPOINTMENT_PAGE", "Already on appointment page");
+    return true;
+  }
+
+  reportStatus(
+    "RESCHEDULE_NAV",
+    "Navigating: My Appointments -> RESCHEDULE -> Confirm",
+  );
+
+  const MY_APPTS_URL =
+    "https://www.usvisaappt.com/visaapplicantui/home/appointment/myappointment";
+
+  // User requirement: do NOT rely on sidebar clicks for this step.
+  // Always navigate directly to the My Appointments URL.
+  await goToDashboard(driver);
+  await dismissAnyOpenOverlays(driver).catch(() => {});
+  await waitForLoadingOverlayToClear(driver, 10_000).catch(() => true);
+
+  reportStatus(
+    "MY_APPOINTMENTS",
+    `Opening My Appointments URL: ${MY_APPTS_URL}`,
+  );
+  await driver.get(MY_APPTS_URL);
+  await driver.wait(
+    until.urlContains("/home/appointment/myappointment"),
+    25_000,
+  );
+  reportStatus("MY_APPOINTMENTS_PAGE", "My Appointments page detected");
+
+  await dismissAnyOpenOverlays(driver).catch(() => {});
+  await waitForLoadingOverlayToClear(driver, 15_000).catch(() => true);
+
+  // Click the RESCHEDULE control.
+  // Real DOM (per user): <a class="... my-app-button-popup-resch ...">RESCHEDULE</a>
+  // Keep a fallback for button-based variants.
+  const rescheduleBtn = await driver
+    .wait(
+      until.elementLocated(
+        By.xpath(
+          "//a[normalize-space(.)='RESCHEDULE' and contains(@class,'my-app-button-popup-resch')] | //a[normalize-space(.)='RESCHEDULE'] | //button[normalize-space(.)='RESCHEDULE' or .//span[normalize-space(.)='RESCHEDULE']]",
+        ),
+      ),
+      15_000,
+    )
+    .catch(() => null);
+
+  if (!rescheduleBtn) {
+    reportStatus("RESCHEDULE_NAV_FAILED", "RESCHEDULE button not found");
+    throw new Error("RESCHEDULE button not found on My Appointments page.");
+  }
+
+  await driver
+    .wait(until.elementIsVisible(rescheduleBtn), 8000)
+    .catch(() => {});
+  await driver.executeScript(
+    "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+    rescheduleBtn,
+  );
+  await sleep(250);
+  await jsClick(driver, rescheduleBtn);
+  reportStatus("RESCHEDULE_CLICK", "Clicked RESCHEDULE");
+
+  // Modal: wait for the Angular Material dialog, then click Confirm within it.
+  const dialog = await driver
+    .wait(
+      until.elementLocated(By.css("mat-dialog-container.mat-dialog-container")),
+      15_000,
+    )
+    .catch(() => null);
+
+  if (!dialog) {
+    reportStatus("RESCHEDULE_NAV_FAILED", "Confirmation modal not found");
+    throw new Error("Reschedule confirmation modal did not appear.");
+  }
+
+  await driver.wait(until.elementIsVisible(dialog), 8000).catch(() => {});
+
+  const confirmBtn = await dialog
+    .findElement(
+      By.xpath(
+        ".//button[@cdkfocusinitial or .//span[normalize-space(.)='Confirm' or normalize-space(.)='CONFIRM'] or normalize-space(.)='Confirm' or normalize-space(.)='CONFIRM']",
+      ),
+    )
+    .catch(() => null);
+
+  if (!confirmBtn) {
+    reportStatus("RESCHEDULE_NAV_FAILED", "Confirm button not found");
+    throw new Error(
+      "Confirm button not found in reschedule confirmation modal.",
+    );
+  }
+
+  await driver.wait(until.elementIsVisible(confirmBtn), 8000).catch(() => {});
+  await sleep(200);
+  await jsClick(driver, confirmBtn);
+  reportStatus("RESCHEDULE_CONFIRM", "Clicked Confirm");
+
+  // Best-effort: wait for modal to close before proceeding.
+  await driver.wait(until.stalenessOf(dialog), 15_000).catch(() => {});
+
+  // After confirm, the app should navigate to the appointment booking page.
+  // Wait for either URL change away from /myappointment, or the booking block.
+  await waitForLoadingOverlayToClear(driver, 20_000).catch(() => true);
+  await driver
+    .wait(async () => {
+      const u = await driver.getCurrentUrl().catch(() => "");
+      if (u.includes("/appointment") && !u.includes("/myappointment"))
+        return true;
+      const bookingBlock = await driver
+        .findElements(By.css(".ofc-book-slot-block"))
+        .catch(() => []);
+      return bookingBlock.length > 0;
+    }, 30_000)
+    .catch(() => {});
+
+  await dismissAnyOpenOverlays(driver).catch(() => {});
+  await waitForLoadingOverlayToClear(driver, 15_000).catch(() => true);
+
+  console.log("Appointment booking page reached.");
+  reportStatus("APPOINTMENT_PAGE", "Appointment booking page reached");
+  return true;
+}
+
+async function goToAppointmentPage(
+  driver,
+  { forceFromDashboard = false } = {},
+) {
+  if (CONFIG.RESCHEDULE) {
+    return goToRescheduleAppointment(driver, { forceFromDashboard });
+  }
+  return goToPendingAppointment(driver, { forceFromDashboard });
+}
+
 async function selectPickupPoint(driver) {
-  // If the app is stuck in the loading overlay, refresh until it clears.
+  // If the app is stuck in the loading overlay, wait/stabilize until it clears (no refresh).
   const preCleared = await waitForLoadingOverlayToClear(driver, 10_000).catch(
     () => true,
   );
@@ -1358,7 +1657,7 @@ async function selectPickupPoint(driver) {
       );
 
       // Step 3: wait for desired option inside overlay.
-      // If we can't find the option (e.g., Accra), refresh and retry.
+      // If we can't find the option (e.g., Accra), dismiss overlays and retry.
       // eslint-disable-next-line no-await-in-loop
       const option = await driver
         .wait(
@@ -1683,6 +1982,16 @@ async function appointmentWatcher(driver) {
   let attemptsInWindow = 0;
   let nextAttemptAtMs = Date.now();
 
+  async function isOnAppointmentBookingPage() {
+    const u = await driver.getCurrentUrl().catch(() => "");
+    if (u.includes("/appointment") && !u.includes("/myappointment"))
+      return true;
+    const bookingBlock = await driver
+      .findElements(By.css(".ofc-book-slot-block"))
+      .catch(() => []);
+    return bookingBlock.length > 0;
+  }
+
   while (true) {
     try {
       // Reset attempt window every WINDOW_MS.
@@ -1711,10 +2020,28 @@ async function appointmentWatcher(driver) {
         continue;
       }
 
+      // Ensure we're on the appointment booking page BEFORE pacing/counting an attempt.
+      // This keeps the 2-second cadence limited to the actions on the appointment page.
+      if (!(await isOnAppointmentBookingPage())) {
+        reportStatus(
+          "NAV",
+          "Not on appointment page; navigating (not counted as an attempt)",
+        );
+
+        if (!(await isSessionAlive(driver))) {
+          await recoverSession(driver);
+        }
+
+        await goToAppointmentPage(driver, { forceFromDashboard: true });
+        // Give the UI a moment and restart the cadence after navigation.
+        nextAttemptAtMs = Date.now() + intervalMs;
+        continue;
+      }
+
       // Pace attempts: start an attempt every INTERVAL_MS.
       const waitMs = nextAttemptAtMs - Date.now();
       if (waitMs > 0) {
-        // Short waits don't need keep-alive; avoid spamming refresh.
+        // Short waits don't need keep-alive; avoid spamming actions.
         await sleep(waitMs);
       }
 
@@ -1740,7 +2067,7 @@ async function appointmentWatcher(driver) {
         );
       }
 
-      // If the page looks stuck in loading, refresh to avoid appearing hung.
+      // If the page looks stuck in loading, stabilize (no refresh).
       const ready = await waitForLoadingOverlayToClear(driver, 8000).catch(
         () => true,
       );
@@ -1755,10 +2082,7 @@ async function appointmentWatcher(driver) {
         await recoverSession(driver);
       }
 
-      // Always reset navigation before attempting pickup/calendar.
-      // This avoids getting stuck when keepalive refresh leaves us on /appointment
-      // but the dashboard button isn't present.
-      await goToPendingAppointment(driver, { forceFromDashboard: false });
+      // We should already be on the appointment page; avoid doing navigation inside the attempt cadence.
 
       const result = await fastBookingAttempt(driver);
       if (result === "SUCCESS") {

@@ -22,11 +22,18 @@ import type {
 } from "@/services/users/users.types";
 import { Button } from "@/components/ui/button";
 import { useMemo } from "react";
-import { useForm, useWatch } from "react-hook-form";
+import { Controller, useForm, useWatch } from "react-hook-form";
 import {
   DatePreferencesPicker,
   type DatePreferencesValue,
 } from "@/components/ui/date-preferences-picker";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 const DEFAULT_LOGIN_URL = "https://www.usvisaappt.com/visaapplicantui/login";
 
@@ -54,6 +61,7 @@ export default function UpsertUserDialog(props: {
       email: "",
       password: "",
       displayName: "",
+      reschedule: false,
 
       dateStart: null,
       dateEnd: null,
@@ -70,6 +78,7 @@ export default function UpsertUserDialog(props: {
       email: initial?.config?.email,
       displayName: initial?.config?.displayName,
       password: "",
+      reschedule: initial?.config?.reschedule ?? false,
 
       dateStart: initial?.config?.dateStart ?? null,
       dateEnd: initial?.config?.dateEnd ?? null,
@@ -232,6 +241,43 @@ export default function UpsertUserDialog(props: {
                     onChange={setPrefs}
                     disabled={pending}
                   />
+                </div>
+              </FieldContent>
+            </Field>
+
+            <Field>
+              <FieldLabel>
+                <FieldTitle>Reschedule Mode</FieldTitle>
+              </FieldLabel>
+              <FieldContent>
+                <div className="grid gap-2 md:grid-cols-[220px_1fr] md:items-center">
+                  <Controller
+                    control={form.control}
+                    name={"reschedule" as never}
+                    render={({ field }) => (
+                      <Select
+                        value={Boolean(field.value) ? "yes" : "no"}
+                        onValueChange={(v) => field.onChange(v === "yes")}
+                        disabled={pending}
+                      >
+                        <SelectTrigger className="w-full cursor-pointer">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="no" className="cursor-pointer">
+                            No
+                          </SelectItem>
+                          <SelectItem value="yes" className="cursor-pointer">
+                            Yes
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    )}
+                  />
+                  <div className="text-sm text-muted-foreground">
+                    When set to Yes, the bot navigates via “My Appointments →
+                    Reschedule appointment”.
+                  </div>
                 </div>
               </FieldContent>
             </Field>
