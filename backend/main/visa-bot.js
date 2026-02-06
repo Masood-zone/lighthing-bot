@@ -284,6 +284,9 @@ async function createDriver() {
 
   // Reduce background network chatter (helps with noisy Chrome GCM logs like DEPRECATED_ENDPOINT).
   options.addArguments(
+    // Commonly required in containerized Linux runtimes.
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
     "--disable-background-networking",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",

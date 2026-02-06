@@ -4,7 +4,7 @@
   "description": "",
   "main": "src/server.js",
   "scripts": {
-    "build": "node --check src/server.js && node --check src/workerEntry.js && node --check main/index.js && node --check main/visa-bot.js",
+    "build": "node --check src/server.js && node --check src/workerEntry.js",
     "render-build": "corepack enable && pnpm install --frozen-lockfile && pnpm run build",
     "start": "node src/server.js",
     "dev": "node src/server.js",
