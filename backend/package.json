@@ -4,6 +4,7 @@
   "description": "",
   "main": "src/server.js",
   "scripts": {
+    "build": "node --check src/server.js && node --check src/workerEntry.js && node --check main/index.js && node --check main/visa-bot.js",
     "start": "node src/server.js",
     "dev": "node src/server.js",
     "start:worker": "node visa-bot.js",

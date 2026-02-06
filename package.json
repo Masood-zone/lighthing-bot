@@ -1,0 +1,10 @@
+{
+  "name": "lighthing-bot",
+  "private": true,
+  "packageManager": "pnpm@10.27.0",
+  "scripts": {
+    "build": "pnpm -C backend build && pnpm -C frontend build",
+    "build:backend": "pnpm -C backend build",
+    "build:frontend": "pnpm -C frontend build"
+  }
+}
