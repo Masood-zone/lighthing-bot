@@ -1,7 +1,10 @@
 import axios from "axios";
 
+export const ROOT_URL = "https://lighthing-bot.onrender.com/api";
+
 export const apiClient = axios.create({
-  baseURL: "http://localhost:3001/api",
+  // baseURL: "http://localhost:3001/api",
+  baseURL: ROOT_URL,
   headers: {
     "Access-Control-Allow-Origin": "*",
     "Content-Type": "application/json",

@@ -5,14 +5,18 @@
   "main": "src/server.js",
   "scripts": {
     "build": "node --check src/server.js && node --check src/workerEntry.js && node --check main/index.js && node --check main/visa-bot.js",
+    "render-build": "corepack enable && pnpm install --frozen-lockfile && pnpm run build",
     "start": "node src/server.js",
     "dev": "node src/server.js",
-    "start:worker": "node visa-bot.js",
+    "start:worker": "node main/visa-bot.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=20 <23"
+  },
   "packageManager": "pnpm@10.27.0",
   "dependencies": {
     "cors": "^2.8.5",
