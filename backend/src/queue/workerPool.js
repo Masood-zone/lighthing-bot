@@ -39,7 +39,8 @@ class WorkerPool {
    */
   constructor({ store, maxConcurrent, workerEntry, baseDir }) {
     this.store = store;
-    this.maxConcurrent = Math.max(1, Number(maxConcurrent || 1));
+    // Allow disabling worker execution entirely by setting MAX_CONCURRENT=0.
+    this.maxConcurrent = Math.max(0, Number(maxConcurrent ?? 1));
     this.workerEntry = workerEntry;
     this.baseDir = baseDir;
 
@@ -55,6 +56,7 @@ class WorkerPool {
 
   getSnapshot() {
     return {
+      workersEnabled: this.maxConcurrent > 0,
       maxConcurrent: this.maxConcurrent,
       queued: this.queue.slice(),
       active: Array.from(this.active.keys()),
@@ -65,6 +67,20 @@ class WorkerPool {
   }
 
   enqueue(sessionId) {
+    if (this.maxConcurrent === 0) {
+      this.store.setStatus(
+        sessionId,
+        "BLOCKED",
+        "Workers are disabled on this service (MAX_CONCURRENT=0)",
+      );
+      this.store.appendLog(
+        sessionId,
+        "warn",
+        "Attempted to start worker but workers are disabled (MAX_CONCURRENT=0)",
+      );
+      this.store.setQueueTimes(sessionId, { finishedAt: nowIso() });
+      return;
+    }
     if (this.queue.includes(sessionId) || this.active.has(sessionId)) return;
     this.queue.push(sessionId);
     this.store.setStatus(sessionId, "QUEUED", "Queued for execution");

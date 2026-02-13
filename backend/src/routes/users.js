@@ -119,6 +119,12 @@ function normalizeDatePrefs(body) {
 function createUsersRouter({ store, pool, baseDir }) {
   const router = express.Router();
 
+  function readBoolEnv(name) {
+    const v = process.env[name];
+    if (v === undefined) return undefined;
+    return v === "1" || String(v).toLowerCase() === "true";
+  }
+
   // List users
   router.get("/", (req, res) => {
     res.json(store.listSessions().map(sanitizeUser));
@@ -149,9 +155,24 @@ function createUsersRouter({ store, pool, baseDir }) {
       password,
       displayName,
       pickupPoint = "Accra",
-      headless = false,
+      headless,
       reschedule,
+      autoStart,
     } = req.body || {};
+
+    const defaultHeadless =
+      readBoolEnv("DEFAULT_HEADLESS") ?? process.env.NODE_ENV === "production";
+    const headlessEffective =
+      typeof headless === "boolean" ? headless : defaultHeadless;
+
+    const envAutoStart = readBoolEnv("AUTO_START_ON_CREATE") ?? false;
+    const queryAutoStart =
+      req.query?.autoStart === "1" ||
+      String(req.query?.autoStart || "").toLowerCase() === "true";
+    const autoStartEffective =
+      typeof autoStart === "boolean"
+        ? autoStart
+        : queryAutoStart || envAutoStart;
 
     const rescheduleBool = reschedule === undefined ? false : reschedule;
 
@@ -237,7 +258,7 @@ function createUsersRouter({ store, pool, baseDir }) {
         password,
         displayName,
         pickupPoint,
-        headless,
+        headless: headlessEffective,
         reschedule: rescheduleBool,
         dateStart,
         dateEnd,
@@ -247,7 +268,15 @@ function createUsersRouter({ store, pool, baseDir }) {
         weeksFromNowMax,
       });
 
-      return res.status(201).json({ id: user.id, user: sanitizeUser(user) });
+      if (autoStartEffective) {
+        pool.enqueue(user.id);
+      }
+
+      return res.status(201).json({
+        id: user.id,
+        user: sanitizeUser(user),
+        autoStarted: Boolean(autoStartEffective),
+      });
     } catch (err) {
       if (err?.code === "SECRET_KEY_MISSING") {
         return res.status(500).json({
