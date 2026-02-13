@@ -1,5 +1,8 @@
 node_modules/
 
+# portable toolchain (created by setup-backend.cmd fallback)
+.tools/
+
 # local secrets
 .env
 
