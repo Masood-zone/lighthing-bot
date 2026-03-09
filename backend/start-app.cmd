@@ -20,7 +20,7 @@ if not exist "%BACKEND_DIR%\package.json" (
   echo   %BACKEND_DIR%
   echo.
   echo Usage:
-  echo   setup-backend.cmd ^<path-to-backend-folder^>
+  echo   start-app.cmd ^<path-to-backend-folder^>
   echo.
   pause
   exit /b 1

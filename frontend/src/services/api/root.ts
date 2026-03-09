@@ -1,6 +1,6 @@
 import axios from "axios";
 
-export const ROOT_URL = "https://lighthing-bot.onrender.com/api";
+export const ROOT_URL = import.meta.env.REACT_APP_API_URL || "http://localhost:3001/api";
 
 export const apiClient = axios.create({
   // baseURL: "http://localhost:3001/api",
