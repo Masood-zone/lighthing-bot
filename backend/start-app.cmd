@@ -22,16 +22,13 @@ if not exist "%BACKEND_DIR%\package.json" (
   echo Usage:
   echo   start-app.cmd ^<path-to-backend-folder^>
   echo.
-  pause
+  call :pause_if_needed
   exit /b 1
 )
 
-REM Open the backend directory in Explorer for convenience
-start "Backend Folder" explorer.exe "%BACKEND_DIR%" >nul 2>nul
-
-pushd "%BACKEND_DIR%" || (
+pushd "%BACKEND_DIR%" >nul 2>nul || (
   echo ERROR: Failed to open backend directory.
-  pause
+  call :pause_if_needed
   exit /b 1
 )
 
@@ -46,24 +43,40 @@ call :ensure_pnpm
 if errorlevel 1 goto :fail
 
 echo Installing backend dependencies...
-pnpm -v
-pnpm install
+call pnpm -v
+if errorlevel 1 goto :fail
+
+call pnpm install
 if errorlevel 1 goto :fail
 
 echo.
 echo Starting backend (Ctrl+C to stop)...
-pnpm dev
+call pnpm dev
+set "APP_EXIT_CODE=%ERRORLEVEL%"
 
-popd
-pause
-exit /b 0
+popd >nul 2>nul
+
+echo.
+if "%APP_EXIT_CODE%"=="0" (
+  echo Backend stopped.
+) else (
+  echo Backend exited with code %APP_EXIT_CODE%.
+)
+
+call :pause_if_needed
+exit /b %APP_EXIT_CODE%
 
 :fail
 echo.
 echo Setup failed.
-popd
-pause
+popd >nul 2>nul
+call :pause_if_needed
 exit /b 1
+
+:pause_if_needed
+if /i "%SKIP_PAUSE%"=="1" exit /b 0
+pause
+exit /b 0
 
 :ensure_node
 echo Checking Node.js...
@@ -158,12 +171,13 @@ REM Prefer corepack (ships with Node 16.13+). Uses pinned pnpm version from pack
 where corepack >nul 2>nul
 if not errorlevel 1 (
   echo Enabling pnpm via corepack...
-  corepack enable
+  call corepack enable
   if errorlevel 1 (
     echo ERROR: corepack enable failed.
     exit /b 1
   )
-  corepack prepare pnpm@10.27.0 --activate
+
+  call corepack prepare pnpm@10.27.0 --activate
   if errorlevel 1 (
     echo ERROR: corepack prepare failed.
     exit /b 1
@@ -189,7 +203,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-npm install -g pnpm@10.27.0
+call npm install -g pnpm@10.27.0
 if errorlevel 1 (
   echo ERROR: npm global install pnpm failed.
   exit /b 1
