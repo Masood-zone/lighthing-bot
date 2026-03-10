@@ -7,9 +7,23 @@ echo Visa Bot Backend Bootstrap (Windows)
 echo ======================================
 echo.
 
-REM Allow passing backend path as first argument; default to script directory.
+REM Allow passing backend path as first argument.
 set "BACKEND_DIR=%~1"
-if "%BACKEND_DIR%"=="" set "BACKEND_DIR=%~dp0"
+if "%BACKEND_DIR%"=="" call :resolve_backend_dir
+
+if not defined BACKEND_DIR (
+  echo ERROR: Could not locate the backend folder automatically.
+  echo Checked:
+  echo   %~dp0
+  echo   %~dp0backend
+  echo   %~dp0app\backend
+  echo.
+  echo Usage:
+  echo   start-app.cmd ^<path-to-backend-folder^>
+  echo.
+  call :pause_if_needed
+  exit /b 1
+)
 
 REM Normalize trailing quote/backslash handling
 for %%I in ("%BACKEND_DIR%") do set "BACKEND_DIR=%%~fI"
@@ -76,6 +90,13 @@ exit /b 1
 :pause_if_needed
 if /i "%SKIP_PAUSE%"=="1" exit /b 0
 pause
+exit /b 0
+
+:resolve_backend_dir
+set "BACKEND_DIR="
+if exist "%~dp0package.json" set "BACKEND_DIR=%~dp0"
+if not defined BACKEND_DIR if exist "%~dp0backend\package.json" set "BACKEND_DIR=%~dp0backend"
+if not defined BACKEND_DIR if exist "%~dp0app\backend\package.json" set "BACKEND_DIR=%~dp0app\backend"
 exit /b 0
 
 :ensure_node

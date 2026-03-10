@@ -7,9 +7,23 @@ echo lighthing-bot Git Update (Windows)
 echo ======================================
 echo.
 
-REM Allow passing repo path as first argument; default to the parent repo folder.
+REM Allow passing repo path as first argument.
 set "REPO_DIR=%~1"
-if "%REPO_DIR%"=="" set "REPO_DIR=%~dp0.."
+if "%REPO_DIR%"=="" call :resolve_repo_dir
+
+if not defined REPO_DIR (
+  echo ERROR: Could not locate the repository folder automatically.
+  echo Checked:
+  echo   %~dp0
+  echo   %~dp0..
+  echo   %~dp0app
+  echo.
+  echo Usage:
+  echo   pull-main.cmd ^<path-to-repo-folder^>
+  echo.
+  call :pause_if_needed
+  exit /b 1
+)
 
 REM Normalize trailing quote/backslash handling
 for %%I in ("%REPO_DIR%") do set "REPO_DIR=%%~fI"
@@ -26,10 +40,7 @@ if not exist "%REPO_DIR%\.git" (
   exit /b 1
 )
 
-REM Open the repository directory in Explorer for convenience
-start "Repository Folder" explorer.exe "%REPO_DIR%" >nul 2>nul
-
-pushd "%REPO_DIR%" || (
+pushd "%REPO_DIR%" >nul 2>nul || (
   echo ERROR: Failed to open repository directory.
   call :pause_if_needed
   exit /b 1
@@ -86,7 +97,7 @@ if defined SWITCHED_TO_MAIN (
   if errorlevel 1 (
     echo.
     echo WARNING: main was updated, but returning to !ORIGINAL_BRANCH! failed.
-    popd
+    popd >nul 2>nul
     call :pause_if_needed
     exit /b 1
   )
@@ -95,7 +106,7 @@ if defined SWITCHED_TO_MAIN (
 echo.
 echo Repository update completed successfully.
 
-popd
+popd >nul 2>nul
 call :pause_if_needed
 exit /b 0
 
@@ -115,13 +126,20 @@ goto :fail
 
 :fail
 echo Setup failed.
-popd
+popd >nul 2>nul
 call :pause_if_needed
 exit /b 1
 
 :pause_if_needed
 if /i "%SKIP_PAUSE%"=="1" exit /b 0
 pause
+exit /b 0
+
+:resolve_repo_dir
+set "REPO_DIR="
+if exist "%~dp0.git" set "REPO_DIR=%~dp0"
+if not defined REPO_DIR if exist "%~dp0..\.git" set "REPO_DIR=%~dp0.."
+if not defined REPO_DIR if exist "%~dp0app\.git" set "REPO_DIR=%~dp0app"
 exit /b 0
 
 :ensure_git
