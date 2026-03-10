@@ -16,7 +16,7 @@ if not defined REPO_DIR (
   echo Checked:
   echo   %~dp0
   echo   %~dp0..
-  echo   %~dp0app
+  echo   %~dp0app\backend
   echo.
   echo Usage:
   echo   pull-main.cmd ^<path-to-repo-folder^>
