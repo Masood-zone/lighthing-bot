@@ -33,6 +33,28 @@ function logWorkerToBackendConsole(sessionId, level, message) {
   console.log(`${prefix} ${msg}`);
 }
 
+function getSessionUserLabel(session) {
+  const displayName = safeOneLine(session?.config?.displayName);
+  const email = safeOneLine(session?.config?.email);
+
+  if (displayName && email) {
+    return `${displayName} <${email}>`;
+  }
+
+  return displayName || email || "unknown user";
+}
+
+function logSessionLifecycle(sessionId, session, action, detail = "") {
+  const prefix = `[${nowIso()}] [session:${sessionId}]`;
+  const userLabel = getSessionUserLabel(session);
+  const message = safeOneLine(detail);
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `${prefix} ${action} for ${userLabel}${message ? ` - ${message}` : ""}`,
+  );
+}
+
 class WorkerPool {
   /**
    * @param {{ store: import('../store/sessionStore').SessionStore, maxConcurrent: number, workerEntry: string, baseDir: string }} opts
@@ -67,6 +89,9 @@ class WorkerPool {
   }
 
   enqueue(sessionId) {
+    const session = this.store.getSession(sessionId);
+    if (!session) return;
+
     if (this.maxConcurrent === 0) {
       this.store.setStatus(
         sessionId,
@@ -79,12 +104,19 @@ class WorkerPool {
         "Attempted to start worker but workers are disabled (MAX_CONCURRENT=0)",
       );
       this.store.setQueueTimes(sessionId, { finishedAt: nowIso() });
+      logSessionLifecycle(
+        sessionId,
+        session,
+        "Blocked session start",
+        "Workers are disabled (MAX_CONCURRENT=0)",
+      );
       return;
     }
     if (this.queue.includes(sessionId) || this.active.has(sessionId)) return;
     this.queue.push(sessionId);
     this.store.setStatus(sessionId, "QUEUED", "Queued for execution");
     this.store.setQueueTimes(sessionId, { enqueuedAt: nowIso() });
+    logSessionLifecycle(sessionId, session, "Queued session start");
     this._tick();
   }
 
@@ -93,11 +125,15 @@ class WorkerPool {
   }
 
   stop(sessionId) {
+    const session = this.store.getSession(sessionId);
+    if (!session) return false;
+
     this.dequeue(sessionId);
 
     const child = this.active.get(sessionId);
     if (child) {
       this.store.appendLog(sessionId, "warn", "Stopping worker (SIGTERM)");
+      logSessionLifecycle(sessionId, session, "Stopping session");
       try {
         child.kill("SIGTERM");
       } catch {
@@ -108,6 +144,7 @@ class WorkerPool {
 
     this.store.setStatus(sessionId, "STOPPED", "Stopped");
     this.store.setQueueTimes(sessionId, { finishedAt: nowIso() });
+    logSessionLifecycle(sessionId, session, "Stopped session");
     return false;
   }
 
@@ -226,6 +263,12 @@ class WorkerPool {
       exitCode: null,
       signal: null,
     });
+    logSessionLifecycle(
+      sessionId,
+      session,
+      "Started session",
+      child.pid ? `pid ${child.pid}` : "",
+    );
 
     child.stdout?.on("data", (buf) => {
       const line = buf.toString("utf8").trim();
@@ -305,6 +348,7 @@ class WorkerPool {
           "STOPPED",
           `Stopped by signal ${signal}`,
         );
+        logSessionLifecycle(sessionId, session, "Stopped session", signal);
       } else {
         this.store.setStatus(
           sessionId,

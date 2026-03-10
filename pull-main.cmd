@@ -15,7 +15,7 @@ if not defined REPO_DIR (
   echo ERROR: Could not locate the repository folder automatically.
   echo Checked:
   echo   %~dp0
-  echo   %~dp0..
+  echo   %~dp0backend
   echo   %~dp0app\backend
   echo.
   echo Usage:
