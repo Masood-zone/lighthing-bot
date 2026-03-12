@@ -34,6 +34,21 @@ type BackendRuntimePaths = {
   serverScript: string
 }
 
+function getSeleniumManagerBinaryName(): string {
+  return process.platform === 'win32' ? 'selenium-manager.exe' : 'selenium-manager'
+}
+
+function getSeleniumManagerPlatformDir(): string {
+  switch (process.platform) {
+    case 'darwin':
+      return 'macos'
+    case 'win32':
+      return 'windows'
+    default:
+      return 'linux'
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms))
 }
@@ -143,11 +158,43 @@ function getNodePath(): string {
     join(app.getAppPath(), 'node_modules'),
     join(process.cwd(), 'node_modules'),
     join(process.resourcesPath, 'app.asar', 'node_modules'),
+    join(process.resourcesPath, 'app.asar.unpacked', 'node_modules'),
     join(process.resourcesPath, 'app', 'node_modules'),
     process.env.NODE_PATH
   ].filter(Boolean)
 
   return Array.from(new Set(candidatePaths)).join(delimiter)
+}
+
+function getSeleniumManagerPath(): string | undefined {
+  const platformDir = getSeleniumManagerPlatformDir()
+  const binaryName = getSeleniumManagerBinaryName()
+
+  const candidatePaths = [
+    join(app.getAppPath(), 'node_modules', 'selenium-webdriver', 'bin', platformDir, binaryName),
+    join(process.cwd(), 'node_modules', 'selenium-webdriver', 'bin', platformDir, binaryName),
+    join(
+      process.resourcesPath,
+      'app.asar.unpacked',
+      'node_modules',
+      'selenium-webdriver',
+      'bin',
+      platformDir,
+      binaryName
+    ),
+    join(
+      process.resourcesPath,
+      'app.asar',
+      'node_modules',
+      'selenium-webdriver',
+      'bin',
+      platformDir,
+      binaryName
+    ),
+    process.env.SE_MANAGER_PATH
+  ].filter(Boolean) as string[]
+
+  return candidatePaths.find((candidatePath) => existsSync(candidatePath))
 }
 
 function logBackendStream(kind: 'stdout' | 'stderr', chunk: Buffer): void {
@@ -248,6 +295,7 @@ export async function startEmbeddedBackend(): Promise<EmbeddedBackendHandle> {
 
   const template = resolveBackendTemplate()
   const runtime = getRuntimePaths()
+  const seleniumManagerPath = getSeleniumManagerPath()
 
   prepareBackendRuntime(template, runtime)
 
@@ -262,9 +310,14 @@ export async function startEmbeddedBackend(): Promise<EmbeddedBackendHandle> {
       ...process.env,
       ELECTRON_RUN_AS_NODE: '1',
       NODE_PATH: getNodePath(),
+      ...(seleniumManagerPath ? { SE_MANAGER_PATH: seleniumManagerPath } : {}),
       PORT: String(EMBEDDED_BACKEND_PORT)
     }
   })
+
+  if (seleniumManagerPath) {
+    console.log(`[embedded-backend] Using Selenium Manager at ${seleniumManagerPath}`)
+  }
 
   child.stdout?.on('data', (chunk) => logBackendStream('stdout', chunk))
   child.stderr?.on('data', (chunk) => logBackendStream('stderr', chunk))

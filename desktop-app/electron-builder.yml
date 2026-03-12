@@ -11,6 +11,7 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 asarUnpack:
   - resources/**
+  - node_modules/selenium-webdriver/**
 extraResources:
   - from: ../backend/src
     to: backend/src
