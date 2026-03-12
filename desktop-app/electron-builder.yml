@@ -11,6 +11,21 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 asarUnpack:
   - resources/**
+extraResources:
+  - from: ../backend/src
+    to: backend/src
+    filter:
+      - '**/*'
+  - from: ../backend/main
+    to: backend/main
+    filter:
+      - '**/*'
+  - from: ../backend/data
+    to: backend/data
+    filter:
+      - 'users.json'
+  - from: build/embedded-backend.env
+    to: backend/.env
 win:
   executableName: LightningBot
   icon: build/icon.ico

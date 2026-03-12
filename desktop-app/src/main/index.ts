@@ -1,11 +1,16 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+import { startEmbeddedBackend } from './backendProcess'
+
+let mainWindow: BrowserWindow | null = null
+let embeddedBackend: Awaited<ReturnType<typeof startEmbeddedBackend>> | null = null
+let isQuitting = false
 
 function createWindow(): void {
   // Create the browser window.
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1440,
     height: 960,
     minWidth: 1200,
@@ -21,7 +26,7 @@ function createWindow(): void {
   })
 
   mainWindow.on('ready-to-show', () => {
-    mainWindow.show()
+    mainWindow?.show()
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -41,7 +46,7 @@ function createWindow(): void {
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.lightningbot.app')
 
@@ -55,6 +60,15 @@ app.whenReady().then(() => {
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
 
+  try {
+    embeddedBackend = await startEmbeddedBackend()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    dialog.showErrorBox('Lightning Bot backend failed to start', message)
+    app.quit()
+    return
+  }
+
   createWindow()
 
   app.on('activate', function () {
@@ -62,6 +76,21 @@ app.whenReady().then(() => {
     // dock icon is clicked and there are no other windows open.
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+})
+
+app.on('before-quit', (event) => {
+  if (isQuitting) return
+
+  event.preventDefault()
+  isQuitting = true
+
+  Promise.resolve(embeddedBackend?.stop())
+    .catch((error) => {
+      console.error('[embedded-backend] Failed to stop cleanly:', error)
+    })
+    .finally(() => {
+      app.quit()
+    })
 })
 
 // Quit when all windows are closed, except on macOS. There, it's common

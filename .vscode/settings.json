@@ -1,5 +1,9 @@
 {
   "chat.tools.terminal.autoApprove": {
-    "pnpm": true
+    "pnpm": true,
+    "/^cd \"c:/Users/YEBOAH DICKSON OSEI/Desktop/Work/lighthing-bot/desktop-app\" && node -e \"const fs=require\\('node:fs'\\); const pngToIco=require\\('png-to-ico'\\)\\.default; \\(async\\(\\)=>\\{const buffer=await pngToIco\\(\\['\\.\\./frontend/public/android-chrome-512x512\\.png'\\]\\); fs\\.writeFileSync\\('build/icon\\.ico', buffer\\)\\}\\)\\(\\)\\.catch\\(\\(error\\)=>\\{console\\.error\\(error\\); process\\.exit\\(1\\)\\}\\)\"$/": {
+      "approve": true,
+      "matchCommandLine": true
+    }
   }
 }
