@@ -1,5 +1,7 @@
 node_modules
 dist
+dist-win-noedit
+dist-win
 out
 .DS_Store
 .eslintcache
