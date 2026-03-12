@@ -1,5 +1,5 @@
-appId: com.electron.app
-productName: lighthingbot-app
+appId: com.lightningbot.app
+productName: Lightning Bot
 directories:
   buildResources: build
 files:
@@ -12,7 +12,8 @@ files:
 asarUnpack:
   - resources/**
 win:
-  executableName: lighthingbot-app
+  executableName: LightningBot
+  icon: build/icon.ico
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
