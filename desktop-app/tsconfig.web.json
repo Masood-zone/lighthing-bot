@@ -11,6 +11,11 @@
     "jsx": "react-jsx",
     "baseUrl": ".",
     "types": ["vite/client"],
+    "noEmit": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
     "paths": {
       "@/*": [
         "src/renderer/src/*"
