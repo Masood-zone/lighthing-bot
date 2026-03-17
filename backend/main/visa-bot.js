@@ -1702,11 +1702,39 @@ async function goToPendingAppointment(
   driver,
   { forceFromDashboard = false } = {},
 ) {
-  const url = await driver.getCurrentUrl();
-  if (!forceFromDashboard && url.includes("/appointment")) {
-    console.log("Already on appointment page.");
-    reportStatus("APPOINTMENT_PAGE", "Already on appointment page");
+  const url = await driver.getCurrentUrl().catch(() => "");
+
+  // If we already have the booking block in DOM, we're ready to hunt.
+  const bookingBlocksNow = await driver
+    .findElements(By.css(".ofc-book-slot-block"))
+    .catch(() => []);
+  if (bookingBlocksNow.length > 0) {
+    console.log("Already on appointment booking page.");
+    reportStatus("APPOINTMENT_PAGE", "Already on appointment booking page");
     return true;
+  }
+
+  // If we're already on an appointment route (but the booking UI is still loading),
+  // do NOT restart navigation (this causes repeated reload loops). Just wait.
+  if (url.includes("/appointment") && !url.includes("/myappointment")) {
+    reportStatus(
+      "BOOKING_WAIT",
+      "On appointment route; waiting for booking page to fully load",
+    );
+    const ready = await waitForAppointmentBookingPageReady(driver, {
+      timeoutMs: 120_000,
+    });
+    if (ready) {
+      console.log("Appointment booking page reached.");
+      reportStatus("APPOINTMENT_PAGE", "Appointment booking page reached");
+      return true;
+    }
+
+    // Fall through to full navigation if it still didn't load.
+    reportLog(
+      "warn",
+      "Booking UI did not load on appointment route; restarting navigation",
+    );
   }
 
   // Navigation can end up on /appointment after keepalive/navigation; in that case
@@ -1810,8 +1838,27 @@ async function goToPendingAppointment(
 
   await driver.wait(until.urlContains("/appointment"), 20000);
 
-  console.log("Appointment page reached.");
-  reportStatus("APPOINTMENT_PAGE", "Appointment page reached");
+  // Ensure the booking UI exists before returning. Without this, the watcher
+  // may see no booking block and re-navigate repeatedly.
+  reportStatus(
+    "BOOKING_WAIT",
+    "Appointment route reached; waiting for booking page UI",
+  );
+  const readyAfterNav = await waitForAppointmentBookingPageReady(driver, {
+    timeoutMs: 120_000,
+  });
+  if (!readyAfterNav) {
+    reportStatus(
+      "NAV_FAILED",
+      "Booking page did not fully load after Pending Appointment navigation",
+    );
+    throw new Error(
+      "Appointment booking page did not fully load after Pending Appointment navigation.",
+    );
+  }
+
+  console.log("Appointment booking page reached.");
+  reportStatus("APPOINTMENT_PAGE", "Appointment booking page reached");
   return true;
 }
 
@@ -1859,8 +1906,7 @@ async function goToRescheduleAppointment(
     "Navigating: My Appointments -> RESCHEDULE -> Confirm",
   );
 
-  const MY_APPTS_URL =
-    "https://www.usvisaappt.com/visaapplicantui/home/appointment/myappointment";
+  const MY_APPTS_URL = `${getAppBaseUrl()}/home/appointment/myappointment`;
 
   // User requirement: do NOT rely on sidebar clicks for this step.
   // Always navigate directly to the My Appointments URL.
@@ -2015,10 +2061,51 @@ async function goToAppointmentPage(
   driver,
   { forceFromDashboard = false } = {},
 ) {
-  if (CONFIG.RESCHEDULE) {
-    return goToRescheduleAppointment(driver, { forceFromDashboard });
+  const preferredMode = CONFIG.RESCHEDULE ? "RESCHEDULE" : "PENDING";
+  reportStatus("MODE", `Appointment mode: ${preferredMode}`);
+
+  try {
+    if (CONFIG.RESCHEDULE) {
+      return await goToRescheduleAppointment(driver, { forceFromDashboard });
+    }
+    return await goToPendingAppointment(driver, { forceFromDashboard });
+  } catch (err) {
+    const msg = String(err?.message || err);
+    const msgLower = msg.toLowerCase();
+
+    // Safe fallback only when the configured mode is clearly unavailable.
+    const modeUnavailable = CONFIG.RESCHEDULE
+      ? msgLower.includes("reschedule button not found")
+      : msgLower.includes("pending appointment") &&
+        msgLower.includes("not found");
+
+    if (!modeUnavailable) throw err;
+
+    const fallbackMode = CONFIG.RESCHEDULE ? "PENDING" : "RESCHEDULE";
+    reportLog(
+      "warn",
+      `Appointment navigation (${preferredMode}) unavailable (${msg}); trying ${fallbackMode}`,
+    );
+    reportStatus(
+      "MODE_FALLBACK",
+      `Trying fallback appointment mode: ${fallbackMode}`,
+    );
+
+    try {
+      if (CONFIG.RESCHEDULE) {
+        return await goToPendingAppointment(driver, { forceFromDashboard });
+      }
+      return await goToRescheduleAppointment(driver, { forceFromDashboard });
+    } catch (fallbackErr) {
+      reportLog(
+        "error",
+        `Fallback appointment navigation (${fallbackMode}) failed: ${String(
+          fallbackErr?.message || fallbackErr,
+        )}`,
+      );
+      throw err;
+    }
   }
-  return goToPendingAppointment(driver, { forceFromDashboard });
 }
 
 async function selectPickupPoint(driver) {
