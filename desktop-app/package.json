@@ -1,6 +1,6 @@
 {
   "name": "lighthingbot-app",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A fast and efficient desktop version of the LightningBot application.",
   "main": "./out/main/index.js",
   "author": "https://lighthingbot.vercel.app",
