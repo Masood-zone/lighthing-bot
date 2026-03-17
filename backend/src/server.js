@@ -19,8 +19,27 @@ const { requireAuth } = require("./middleware/requireAuth");
 const { createRoutes } = require("./routes");
 
 const PORT = Number(process.env.PORT || 3001);
+const HOST =
+  String(
+    process.env.HOST || process.env.VISA_HOST || process.env.BIND_HOST || "",
+  ).trim() || null;
 const BASE_DIR = path.join(__dirname, "..");
-const DATA_DIR = path.join(BASE_DIR, "data");
+function resolveDirFromEnv(name, fallback) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const v = String(raw).trim();
+  if (!v) return fallback;
+  return path.isAbsolute(v) ? v : path.resolve(BASE_DIR, v);
+}
+
+const DATA_DIR = resolveDirFromEnv(
+  "VISA_DATA_DIR",
+  path.join(BASE_DIR, "data"),
+);
+const PROFILES_DIR = resolveDirFromEnv(
+  "VISA_PROFILES_DIR",
+  path.join(BASE_DIR, "profiles"),
+);
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT ?? 2);
 
 const app = express();
@@ -59,6 +78,7 @@ const pool = new WorkerPool({
   maxConcurrent: MAX_CONCURRENT,
   workerEntry,
   baseDir: BASE_DIR,
+  profilesDir: PROFILES_DIR,
 });
 
 const requireAuthMiddleware = requireAuth({ authService, userStore });
@@ -67,15 +87,17 @@ app.use(
     store,
     pool,
     baseDir: BASE_DIR,
+    profilesDir: PROFILES_DIR,
     userStore,
     authService,
     requireAuthMiddleware,
   }),
 );
 
-app.listen(PORT, () => {
+const listener = HOST ? app.listen(PORT, HOST) : app.listen(PORT);
+listener.on("listening", () => {
   // eslint-disable-next-line no-console
-  console.log(`Backend listening on http://localhost:${PORT}`);
+  console.log(`Backend listening on http://${HOST || "localhost"}:${PORT}`);
   if (MAX_CONCURRENT <= 0) {
     // eslint-disable-next-line no-console
     console.log(

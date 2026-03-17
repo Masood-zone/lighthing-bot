@@ -11,6 +11,12 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function readBoolEnv(name) {
+  const v = process.env[name];
+  if (v === undefined) return undefined;
+  return v === "1" || String(v).toLowerCase() === "true";
+}
+
 function safeOneLine(value) {
   return String(value ?? "")
     .replace(/[\r\n]+/g, " ")
@@ -57,14 +63,15 @@ function logSessionLifecycle(sessionId, session, action, detail = "") {
 
 class WorkerPool {
   /**
-   * @param {{ store: import('../store/sessionStore').SessionStore, maxConcurrent: number, workerEntry: string, baseDir: string }} opts
+   * @param {{ store: import('../store/sessionStore').SessionStore, maxConcurrent: number, workerEntry: string, baseDir: string, profilesDir?: string }} opts
    */
-  constructor({ store, maxConcurrent, workerEntry, baseDir }) {
+  constructor({ store, maxConcurrent, workerEntry, baseDir, profilesDir }) {
     this.store = store;
     // Allow disabling worker execution entirely by setting MAX_CONCURRENT=0.
     this.maxConcurrent = Math.max(0, Number(maxConcurrent ?? 1));
     this.workerEntry = workerEntry;
     this.baseDir = baseDir;
+    this.profilesDir = profilesDir || path.join(this.baseDir, "profiles");
 
     /** @type {string[]} */
     this.queue = [];
@@ -178,7 +185,7 @@ class WorkerPool {
     this.store.setStatus(sessionId, "RUNNING", "Starting worker");
     this.store.setQueueTimes(sessionId, { startedAt: nowIso() });
 
-    const profileDir = path.join(this.baseDir, "profiles", sessionId);
+    const profileDir = path.join(this.profilesDir, sessionId);
 
     let passwordPlain = "";
     try {
@@ -215,6 +222,8 @@ class WorkerPool {
       return;
     }
 
+    const forceVisibleBrowser = readBoolEnv("FORCE_VISIBLE_BROWSER") ?? false;
+
     const env = {
       ...process.env,
       VISA_SESSION_ID: sessionId,
@@ -223,7 +232,11 @@ class WorkerPool {
       VISA_USER_PASSWORD: passwordPlain,
       VISA_USER_DISPLAY_NAME: session.config.displayName,
       VISA_PICKUP_POINT: session.config.pickupPoint,
-      VISA_HEADLESS: session.config.headless ? "1" : "0",
+      VISA_HEADLESS: forceVisibleBrowser
+        ? "0"
+        : session.config.headless
+          ? "1"
+          : "0",
       VISA_PROFILE_DIR: profileDir,
       VISA_RESCHEDULE: session.config.reschedule ? "1" : "0",
 
