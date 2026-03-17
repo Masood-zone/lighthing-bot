@@ -438,7 +438,10 @@ async function findGreenAvailableDate(driver) {
   return false;
 }
 
-async function findGreenAvailableDateWithinRange(driver) {
+async function findGreenAvailableDateWithinRange(
+  driver,
+  { excludeKeys = new Set() } = {},
+) {
   // Scan visible calendar cells, find green (#14a38b), parse their date from
   // (day number + current calendar month/year header) and only click if within
   // allowed MIN_DATE..MAX_DATE.
@@ -461,121 +464,172 @@ async function findGreenAvailableDateWithinRange(driver) {
     return { clicked: false, outOfRangeFound: false };
   }
 
-  const cells = await driver.findElements(
-    By.css(
-      "button.mat-calendar-body-cell:not(.mat-calendar-body-disabled), td.mat-calendar-body-cell:not(.mat-calendar-body-disabled)",
-    ),
-  );
+  const minMs = allowed.min ? allowed.min.getTime() : null;
+  const maxMs = allowed.max ? allowed.max.getTime() : null;
 
-  let outOfRangeFound = false;
-  let greenFound = 0;
-  let greenInRangeFound = 0;
+  // Fast path: scan all enabled date buttons in one browser-side pass.
+  const scan = await driver
+    .executeScript(
+      (year, monthIndex, minMsArg, maxMsArg) => {
+        const parse = (color) => {
+          const c = String(color || "")
+            .trim()
+            .toLowerCase();
+          const m = c.match(
+            /rgba?\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\)/,
+          );
+          if (!m) return null;
+          return {
+            r: Number(m[1]),
+            g: Number(m[2]),
+            b: Number(m[3]),
+            a: m[4] === undefined ? 1 : Number(m[4]),
+          };
+        };
+
+        const isGreen = (color) => {
+          const rgb = parse(color);
+          return (
+            rgb && rgb.r === 20 && rgb.g === 163 && rgb.b === 139 && rgb.a !== 0
+          );
+        };
+
+        const buttons = Array.from(
+          document.querySelectorAll(
+            "button.mat-calendar-body-cell:not(.mat-calendar-body-disabled)",
+          ),
+        );
+
+        const greens = [];
+        let greenTotal = 0;
+        let outOfRangeTotal = 0;
+
+        for (const btn of buttons) {
+          try {
+            const ariaPressed = btn.getAttribute("aria-pressed");
+            if (ariaPressed === "true") continue;
+
+            const content = btn.querySelector(
+              ".mat-calendar-body-cell-content",
+            );
+            if (!content) continue;
+
+            // Skip selected cells (sometimes selection is reflected on content class).
+            const contentClass = String(content.getAttribute("class") || "");
+            if (contentClass.includes("mat-calendar-body-selected")) continue;
+
+            const day = Number(String(content.textContent || "").trim());
+            if (!Number.isFinite(day) || day <= 0 || day > 31) continue;
+
+            const bg1 = getComputedStyle(content).backgroundColor;
+            const bg2 = getComputedStyle(btn).backgroundColor;
+            if (!(isGreen(bg1) || isGreen(bg2))) continue;
+
+            greenTotal += 1;
+
+            const dateMs = Date.UTC(year, monthIndex, day);
+            if (minMsArg != null && dateMs < minMsArg) {
+              outOfRangeTotal += 1;
+              continue;
+            }
+            if (maxMsArg != null && dateMs > maxMsArg) {
+              outOfRangeTotal += 1;
+              continue;
+            }
+
+            greens.push([day, btn]);
+          } catch {
+            // ignore
+          }
+        }
+
+        greens.sort((a, b) => a[0] - b[0]);
+        return {
+          scanned: buttons.length,
+          greenTotal,
+          outOfRangeTotal,
+          greens,
+        };
+      },
+      header.year,
+      header.monthIndex,
+      minMs,
+      maxMs,
+    )
+    .catch(() => null);
+
+  if (!scan) {
+    reportStatus("DATE_SCAN_FAILED", "Calendar scan failed; will reset pickup");
+    reportLog("warn", "Calendar scan failed (executeScript returned null)");
+    return { clicked: false, outOfRangeFound: false };
+  }
+
+  const greenFound = Number(scan.greenTotal) || 0;
+  const greenInRangeFound = Array.isArray(scan.greens) ? scan.greens.length : 0;
+  const outOfRangeFound = (Number(scan.outOfRangeTotal) || 0) > 0;
 
   reportLog(
     "info",
-    `Calendar month context: ${header.year}-${String(header.monthIndex + 1).padStart(2, "0")} (cells: ${cells.length})`,
+    `Calendar month context: ${header.year}-${String(header.monthIndex + 1).padStart(2, "0")} (cells: ${Number(scan.scanned) || 0}, green: ${greenFound}, in-range: ${greenInRangeFound})`,
   );
 
-  for (const cell of cells) {
+  // Attempt candidates in order; pick the first that confirms selection.
+  const greens = Array.isArray(scan.greens) ? scan.greens : [];
+  for (const entry of greens) {
+    const day = Number(entry?.[0]);
+    const target = entry?.[1];
+    if (!Number.isFinite(day) || !target) continue;
+
+    const dateKey = `${header.year}-${String(header.monthIndex + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    if (
+      excludeKeys &&
+      typeof excludeKeys.has === "function" &&
+      excludeKeys.has(dateKey)
+    ) {
+      continue;
+    }
+
     try {
-      // eslint-disable-next-line no-await-in-loop
-      const tag = await cell.getTagName();
-      let target = cell;
-
-      // Angular Material typically renders a <button> inside the <td>. Clicking the
-      // <td> is unreliable and can cause repeated scans/resets even when dates exist.
-      if (tag !== "button") {
-        // eslint-disable-next-line no-await-in-loop
-        const btn = await cell
-          .findElement(By.css("button.mat-calendar-body-cell"))
-          .catch(() => null);
-        if (btn) target = btn;
-      }
-
-      // eslint-disable-next-line no-await-in-loop
-      const targetTag = await target.getTagName().catch(() => tag);
-      const isButton = targetTag === "button";
-
-      // Skip already-selected cells (best-effort).
-      if (isButton) {
-        // eslint-disable-next-line no-await-in-loop
-        if (await isDateSelected(driver, target)) continue;
-      }
-
-      // eslint-disable-next-line no-await-in-loop
-      const content = await target
-        .findElement(By.css(".mat-calendar-body-cell-content"))
-        .catch(() => null);
-
-      // eslint-disable-next-line no-await-in-loop
-      const bg1 = content ? await content.getCssValue("background-color") : "";
-      // eslint-disable-next-line no-await-in-loop
-      const bg2 = await target.getCssValue("background-color");
-
-      const isGreen = isGreenAvailableColor(bg1) || isGreenAvailableColor(bg2);
-      if (!isGreen) continue;
-
-      greenFound += 1;
-
-      // Parse the day number from the cell content text.
-      // eslint-disable-next-line no-await-in-loop
-      const dayText = content ? await content.getText() : "";
-      const day = Number(String(dayText || "").trim());
-      if (!Number.isFinite(day) || day <= 0 || day > 31) continue;
-
-      const dateObj = new Date(Date.UTC(header.year, header.monthIndex, day));
-      const inRange = isDateWithinRange(dateObj, allowed.min, allowed.max);
-      if (!inRange) {
-        outOfRangeFound = true;
-        reportStatus(
-          "OUT_OF_RANGE",
-          `Green date ${header.year}-${String(header.monthIndex + 1).padStart(2, "0")}-${String(day).padStart(2, "0")} outside allowed range`,
-        );
-        continue;
-      }
-
-      greenInRangeFound += 1;
-
       await driver.executeScript(
         "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
         target,
       );
-      // eslint-disable-next-line no-await-in-loop
-      await sleep(100);
-
-      reportStatus("DATE", "Selecting green available date (in range)");
-      // eslint-disable-next-line no-await-in-loop
-      await safeClick(driver, target);
-
-      // Confirm selection actually applied before moving on.
-      if (isButton) {
-        // eslint-disable-next-line no-await-in-loop
-        const selected = await driver
-          .wait(async () => isDateSelected(driver, target), 5000)
-          .catch(() => false);
-        if (!selected) {
-          reportStatus(
-            "DATE_CLICK_NO_CONFIRM",
-            "Clicked green date but selection not confirmed; continuing scan",
-          );
-          continue;
-        }
-      }
+      // Small settle; keep fast.
+      await sleep(40);
 
       reportStatus(
-        "DATE_SELECTED",
-        `Clicked in-range green date ${header.year}-${String(header.monthIndex + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+        "DATE",
+        `Selecting green available date (in range): ${dateKey}`,
       );
-      return { clicked: true, outOfRangeFound };
+      await safeClick(driver, target);
+
+      const selected = await driver
+        .wait(async () => isDateSelected(driver, target), 2500)
+        .catch(() => false);
+      if (!selected) {
+        reportStatus(
+          "DATE_CLICK_NO_CONFIRM",
+          `Clicked green date but selection not confirmed: ${dateKey}`,
+        );
+        continue;
+      }
+
+      reportStatus("DATE_SELECTED", `Clicked in-range green date ${dateKey}`);
+      return {
+        clicked: true,
+        outOfRangeFound,
+        dateKey,
+        dateIso: dateKey,
+      };
     } catch {
-      // ignore and continue
+      // ignore and try next candidate
     }
   }
 
   if (greenFound === 0) {
     reportStatus(
       "NO_GREEN_DATE",
-      `No green dates found in current calendar view (cells scanned: ${cells.length})`,
+      `No green dates found in current calendar view (cells scanned: ${Number(scan.scanned) || 0})`,
     );
   } else if (greenInRangeFound === 0) {
     reportStatus(
@@ -676,35 +730,66 @@ async function fastBookingAttempt(driver) {
     reportStatus("ALGO", "Starting booking attempt (green-date algorithm)");
     await selectPickupAccra(driver);
 
-    const dateScan = await findGreenAvailableDateWithinRange(driver);
-    if (!dateScan.clicked) {
-      // If we cannot click an in-range green date, we must reset pickup and loop.
-      // (This includes: no greens, only out-of-range greens, or click failures.)
-      return "RESET_PICKUP";
-    }
+    // NEW behavior:
+    // - If multiple in-range green dates exist, try them in order until we see the
+    //   Available Slot header.
+    // - If a newly green date appears while we're trying (e.g. 23rd shows up after
+    //   26th), the next scan will pick it.
+    const triedDateKeys = new Set();
+    let headerOk = false;
 
-    reportStatus("OVERLAY", "Waiting for loading overlay transition");
-    const overlayOk = await waitForLoadingOverlay(driver, {
-      appearMs: 2500,
-      disappearMs: 15_000,
-    }).catch(() => false);
-    if (!overlayOk) {
+    for (let i = 0; i < 8; i += 1) {
+      const dateScan = await findGreenAvailableDateWithinRange(driver, {
+        excludeKeys: triedDateKeys,
+      });
+
+      if (!dateScan.clicked) {
+        // If we cannot click any more in-range green dates, we must reset pickup and loop.
+        return "RESET_PICKUP";
+      }
+
+      if (dateScan.dateKey) triedDateKeys.add(dateScan.dateKey);
+
       reportStatus(
-        "OVERLAY_TIMEOUT",
-        "Overlay did not appear+disappear as expected; resetting pickup",
+        "OVERLAY",
+        `Waiting for booking UI after date selection: ${dateScan.dateIso || dateScan.dateKey || "(unknown)"}`,
       );
-      return "RESET_PICKUP";
+      const cleared = await waitForLoadingOverlayToClear(driver, 8_000).catch(
+        () => true,
+      );
+      if (!cleared) {
+        reportStatus(
+          "OVERLAY_TIMEOUT",
+          "Loading overlay stuck after date selection; stabilizing",
+        );
+        await refreshAndRecover(driver, "loading overlay stuck after date", {
+          timeoutMs: 20_000,
+        }).catch(() => {});
+      }
+
+      await dismissAnyOpenOverlays(driver).catch(() => {});
+
+      reportStatus("APPLICANT", "Checking applicant checkbox");
+      await checkApplicantCheckbox(driver).catch(() => null);
+
+      reportStatus(
+        "HEADER",
+        `Waiting for Available Slot header (date ${dateScan.dateIso || dateScan.dateKey || "?"})`,
+      );
+      headerOk = await waitForAvailableSlotHeader(driver, 2500);
+      if (headerOk) break;
+
+      reportStatus(
+        "HEADER_MISSING_DATE",
+        `No Available Slot header for ${dateScan.dateIso || dateScan.dateKey || "(unknown)"}; trying next green date`,
+      );
+      await sleep(80);
     }
 
-    reportStatus("APPLICANT", "Checking applicant checkbox");
-    await checkApplicantCheckbox(driver).catch(() => null);
-
-    reportStatus("HEADER", "Waiting for Available Slot header");
-    const headerOk = await waitForAvailableSlotHeader(driver, 8000);
     if (!headerOk) {
       reportStatus(
         "HEADER_MISSING",
-        "Available Slot header not visible; resetting pickup",
+        "Available Slot header not visible for any in-range green date; resetting pickup",
       );
       return "RESET_PICKUP";
     }
@@ -1734,11 +1819,39 @@ async function goToRescheduleAppointment(
   driver,
   { forceFromDashboard = false } = {},
 ) {
-  const url = await driver.getCurrentUrl();
-  if (!forceFromDashboard && url.includes("/appointment")) {
-    console.log("Already on appointment page.");
-    reportStatus("APPOINTMENT_PAGE", "Already on appointment page");
+  const url = await driver.getCurrentUrl().catch(() => "");
+
+  // If we already have the booking block in DOM, we're ready to hunt.
+  const bookingBlocksNow = await driver
+    .findElements(By.css(".ofc-book-slot-block"))
+    .catch(() => []);
+  if (bookingBlocksNow.length > 0) {
+    console.log("Already on appointment booking page.");
+    reportStatus("APPOINTMENT_PAGE", "Already on appointment booking page");
     return true;
+  }
+
+  // If we're already on an appointment route (but the booking UI is still loading),
+  // do NOT restart navigation (this causes repeated reloads). Just wait.
+  if (url.includes("/appointment") && !url.includes("/myappointment")) {
+    reportStatus(
+      "BOOKING_WAIT",
+      "On appointment route; waiting for booking page to fully load",
+    );
+    const ready = await waitForAppointmentBookingPageReady(driver, {
+      timeoutMs: 120_000,
+    });
+    if (ready) {
+      console.log("Appointment booking page reached.");
+      reportStatus("APPOINTMENT_PAGE", "Appointment booking page reached");
+      return true;
+    }
+
+    // Fall through to full navigation if it still didn't load.
+    reportLog(
+      "warn",
+      "Booking UI did not load on appointment route; restarting navigation",
+    );
   }
 
   reportStatus(
@@ -1837,26 +1950,64 @@ async function goToRescheduleAppointment(
   // Best-effort: wait for modal to close before proceeding.
   await driver.wait(until.stalenessOf(dialog), 15_000).catch(() => {});
 
-  // After confirm, the app should navigate to the appointment booking page.
-  // Wait for either URL change away from /myappointment, or the booking block.
-  await waitForLoadingOverlayToClear(driver, 20_000).catch(() => true);
-  await driver
-    .wait(async () => {
-      const u = await driver.getCurrentUrl().catch(() => "");
-      if (u.includes("/appointment") && !u.includes("/myappointment"))
-        return true;
-      const bookingBlock = await driver
-        .findElements(By.css(".ofc-book-slot-block"))
-        .catch(() => []);
-      return bookingBlock.length > 0;
-    }, 30_000)
-    .catch(() => {});
-
-  await dismissAnyOpenOverlays(driver).catch(() => {});
-  await waitForLoadingOverlayToClear(driver, 15_000).catch(() => true);
+  // After confirm, wait for the actual booking UI to exist (no reload loops).
+  reportStatus(
+    "BOOKING_WAIT",
+    "Confirm clicked; waiting for booking page UI to fully load",
+  );
+  const readyAfterConfirm = await waitForAppointmentBookingPageReady(driver, {
+    timeoutMs: 120_000,
+  });
+  if (!readyAfterConfirm) {
+    reportStatus(
+      "RESCHEDULE_NAV_FAILED",
+      "Booking page did not fully load after Confirm",
+    );
+    throw new Error(
+      "Appointment booking page did not fully load after RESCHEDULE Confirm.",
+    );
+  }
 
   console.log("Appointment booking page reached.");
   reportStatus("APPOINTMENT_PAGE", "Appointment booking page reached");
+  return true;
+}
+
+async function waitForAppointmentBookingPageReady(
+  driver,
+  { timeoutMs = 60_000 } = {},
+) {
+  const bookingBlock = await driver
+    .wait(
+      until.elementLocated(By.css(".ofc-book-slot-block")),
+      Math.max(1, timeoutMs),
+    )
+    .catch(() => null);
+
+  if (!bookingBlock) return false;
+
+  await driver
+    .wait(until.elementIsVisible(bookingBlock), 15_000)
+    .catch(() => {});
+
+  // Clear any spinners/overlays; the booking UI can exist but still be unusable.
+  await waitForLoadingOverlayToClear(driver, 60_000).catch(() => true);
+  await dismissAnyOpenOverlays(driver).catch(() => {});
+
+  // Ensure the pickup select is present before returning; this prevents early returns
+  // during partial renders.
+  await driver
+    .wait(
+      until.elementLocated(
+        By.css(
+          ".ofc-book-slot-block mat-select[panelclass*='drop-down-panelcls'], .ofc-book-slot-block mat-select",
+        ),
+      ),
+      30_000,
+    )
+    .catch(() => null);
+
+  if (await isProbablyBlankPage(driver).catch(() => false)) return false;
   return true;
 }
 
