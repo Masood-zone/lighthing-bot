@@ -14,7 +14,7 @@ const CONFIG = {
     process.env.VISA_PLATFORM_URL ||
     "https://www.usvisaappt.com/visaapplicantui/login",
   USER_EMAIL: process.env.VISA_USER_EMAIL || "Wilhelmina219.doe@gmail.com",
-  USER_PASSWORD: process.env.VISA_USER_PASSWORD || "Cyril1234@claridge",
+  USER_PASSWORD: process.env.VISA_USER_PASSWORD,
   // Used to detect that the session is still alive (shown in the dashboard sidebar)
   USER_DISPLAY_NAME: process.env.VISA_USER_DISPLAY_NAME || "Wilhelmina Doe",
   PICKUP_POINT: process.env.VISA_PICKUP_POINT || "Accra",
@@ -480,10 +480,24 @@ async function findGreenAvailableDateWithinRange(driver) {
     try {
       // eslint-disable-next-line no-await-in-loop
       const tag = await cell.getTagName();
-      const target = tag === "button" ? cell : cell;
+      let target = cell;
+
+      // Angular Material typically renders a <button> inside the <td>. Clicking the
+      // <td> is unreliable and can cause repeated scans/resets even when dates exist.
+      if (tag !== "button") {
+        // eslint-disable-next-line no-await-in-loop
+        const btn = await cell
+          .findElement(By.css("button.mat-calendar-body-cell"))
+          .catch(() => null);
+        if (btn) target = btn;
+      }
+
+      // eslint-disable-next-line no-await-in-loop
+      const targetTag = await target.getTagName().catch(() => tag);
+      const isButton = targetTag === "button";
 
       // Skip already-selected cells (best-effort).
-      if (tag === "button") {
+      if (isButton) {
         // eslint-disable-next-line no-await-in-loop
         if (await isDateSelected(driver, target)) continue;
       }
@@ -532,6 +546,22 @@ async function findGreenAvailableDateWithinRange(driver) {
       reportStatus("DATE", "Selecting green available date (in range)");
       // eslint-disable-next-line no-await-in-loop
       await safeClick(driver, target);
+
+      // Confirm selection actually applied before moving on.
+      if (isButton) {
+        // eslint-disable-next-line no-await-in-loop
+        const selected = await driver
+          .wait(async () => isDateSelected(driver, target), 5000)
+          .catch(() => false);
+        if (!selected) {
+          reportStatus(
+            "DATE_CLICK_NO_CONFIRM",
+            "Clicked green date but selection not confirmed; continuing scan",
+          );
+          continue;
+        }
+      }
+
       reportStatus(
         "DATE_SELECTED",
         `Clicked in-range green date ${header.year}-${String(header.monthIndex + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
@@ -566,17 +596,23 @@ async function waitForLoadingOverlay(
   driver,
   { appearMs = 2500, disappearMs = 15_000 } = {},
 ) {
-  // Required behavior: wait for overlay to APPEAR then DISAPPEAR.
+  // The platform does not always show the overlay even when it updates.
+  // Treat "overlay never appeared" as non-fatal to avoid unnecessary re-scans.
   const start = Date.now();
   while (Date.now() - start < appearMs) {
     // eslint-disable-next-line no-await-in-loop
-    if (await isLoadingOverlayVisible(driver)) break;
+    if (await isLoadingOverlayVisible(driver)) {
+      return waitForLoadingOverlayToClear(driver, disappearMs);
+    }
     // eslint-disable-next-line no-await-in-loop
     await sleep(100);
   }
 
-  if (!(await isLoadingOverlayVisible(driver))) return false;
-  return waitForLoadingOverlayToClear(driver, disappearMs);
+  if (await isLoadingOverlayVisible(driver)) {
+    return waitForLoadingOverlayToClear(driver, disappearMs);
+  }
+
+  return true;
 }
 
 async function checkApplicantCheckbox(driver) {
@@ -664,7 +700,7 @@ async function fastBookingAttempt(driver) {
     await checkApplicantCheckbox(driver).catch(() => null);
 
     reportStatus("HEADER", "Waiting for Available Slot header");
-    const headerOk = await waitForAvailableSlotHeader(driver, 4000);
+    const headerOk = await waitForAvailableSlotHeader(driver, 8000);
     if (!headerOk) {
       reportStatus(
         "HEADER_MISSING",
@@ -674,8 +710,23 @@ async function fastBookingAttempt(driver) {
     }
 
     reportStatus("SLOT", "Clicking first available time slot");
-    const slotOkStage1 = await clickFirstTimeSlot(driver);
-    if (!slotOkStage1) {
+    let slotStage1 = await clickFirstTimeSlot(driver);
+    if (!slotStage1.confirmed && slotStage1.foundAny) {
+      reportStatus(
+        "SLOT_RETRY_STAGE1",
+        "Time slots detected but selection not confirmed; retrying",
+      );
+      slotStage1 = await clickFirstAvailableTimeSlot(driver, 6000);
+    }
+
+    if (!slotStage1.confirmed) {
+      if (slotStage1.foundAny) {
+        reportStatus(
+          "SLOT_SELECT_FAILED_STAGE1",
+          "Time slots were visible but none could be selected; resetting pickup",
+        );
+        return "RESET_PICKUP";
+      }
       reportStatus(
         "SLOT_MISSING_STAGE1",
         "No time slot clickable before proceed; will try proceed and re-scan",
@@ -683,8 +734,16 @@ async function fastBookingAttempt(driver) {
     }
 
     reportStatus("PROCEED", "Clicking SELECT POST AND PROCEED");
-    const proceedOkStage1 = await clickProceedButton(driver).catch(() => false);
-    if (!proceedOkStage1) {
+    const beforeProceedUrl = await driver.getCurrentUrl().catch(() => "");
+    const beforeProceedHandles = await driver
+      .getAllWindowHandles()
+      .catch(() => []);
+    const proceedStage1 = await clickProceedButton(driver).catch(() => ({
+      clicked: false,
+      kind: null,
+      text: null,
+    }));
+    if (!proceedStage1.clicked) {
       reportStatus(
         "PROCEED_MISSING",
         "Proceed button not clickable/visible; resetting pickup",
@@ -695,24 +754,104 @@ async function fastBookingAttempt(driver) {
     // Some flows show the time-slot list only AFTER clicking proceed.
     // User requirement: if a list of time buttons appears after proceed, click one.
     reportStatus("OVERLAY", "Waiting for loading overlay after proceed");
-    await waitForLoadingOverlayToClear(driver, 15_000).catch(() => true);
+    const overlayClearedAfterProceed = await waitForLoadingOverlayToClear(
+      driver,
+      30_000,
+    ).catch(() => true);
+    if (!overlayClearedAfterProceed) {
+      reportStatus(
+        "OVERLAY_STUCK_AFTER_PROCEED",
+        "Loading overlay stuck after proceed; stabilizing",
+      );
+      await refreshAndRecover(driver, "loading overlay stuck after proceed", {
+        timeoutMs: 20_000,
+      }).catch(() => {});
+    }
+
+    await switchToNewWindowIfOpened(driver, beforeProceedHandles).catch(() => ({
+      switched: false,
+      handles: beforeProceedHandles,
+    }));
     await dismissAnyOpenOverlays(driver).catch(() => {});
 
+    const afterProceedUrl = await driver.getCurrentUrl().catch(() => "");
+    const blankAfterProceed = await isProbablyBlankPage(driver).catch(
+      () => false,
+    );
+    if (blankAfterProceed) {
+      reportStatus(
+        "PROCEED_WHITE_SCREEN",
+        "Proceed led to a blank/white page; recovering to appointment page",
+      );
+      reportLog(
+        "error",
+        `Blank page after proceed (kind=${proceedStage1.kind || "unknown"}) url: ${afterProceedUrl || "(unknown)"} (from ${beforeProceedUrl || "(unknown)"})`,
+      );
+      await goToAppointmentPage(driver, { forceFromDashboard: true }).catch(
+        () => {},
+      );
+      return "RESET_PICKUP";
+    }
+
     reportStatus("SLOT_STAGE2", "Scanning for time slot buttons after proceed");
-    const slotOkStage2 = await clickFirstAvailableTimeSlot(driver, 6000);
-    if (slotOkStage2) {
+    const slotStage2 = await clickFirstAvailableTimeSlot(driver, 6000);
+    if (slotStage2.confirmed) {
       reportStatus(
         "SLOT_SELECTED_STAGE2",
         "Selected a time slot after proceed",
       );
 
       // If the same proceed button is still present, click it again to continue.
-      const proceedOkStage2 = await clickProceedButton(driver).catch(
-        () => false,
-      );
-      if (proceedOkStage2) {
+      const beforeProceed2Url = await driver.getCurrentUrl().catch(() => "");
+      const beforeProceed2Handles = await driver
+        .getAllWindowHandles()
+        .catch(() => []);
+      const proceedStage2 = await clickProceedButton(driver).catch(() => ({
+        clicked: false,
+        kind: null,
+        text: null,
+      }));
+      if (proceedStage2.clicked) {
         reportStatus("PROCEED_STAGE2", "Clicked proceed after slot selection");
-        await waitForLoadingOverlayToClear(driver, 15_000).catch(() => true);
+        const overlayClearedAfterProceed2 = await waitForLoadingOverlayToClear(
+          driver,
+          30_000,
+        ).catch(() => true);
+        if (!overlayClearedAfterProceed2) {
+          reportStatus(
+            "OVERLAY_STUCK_AFTER_PROCEED2",
+            "Loading overlay stuck after second proceed; stabilizing",
+          );
+          await refreshAndRecover(
+            driver,
+            "loading overlay stuck after second proceed",
+            { timeoutMs: 20_000 },
+          ).catch(() => {});
+        }
+
+        await switchToNewWindowIfOpened(driver, beforeProceed2Handles).catch(
+          () => ({ switched: false, handles: beforeProceed2Handles }),
+        );
+        await dismissAnyOpenOverlays(driver).catch(() => {});
+
+        const afterProceed2Url = await driver.getCurrentUrl().catch(() => "");
+        const blankAfterProceed2 = await isProbablyBlankPage(driver).catch(
+          () => false,
+        );
+        if (blankAfterProceed2) {
+          reportStatus(
+            "PROCEED2_WHITE_SCREEN",
+            "Second proceed led to a blank/white page; recovering",
+          );
+          reportLog(
+            "error",
+            `Blank page after second proceed (kind=${proceedStage2.kind || "unknown"}) url: ${afterProceed2Url || "(unknown)"} (from ${beforeProceed2Url || "(unknown)"})`,
+          );
+          await goToAppointmentPage(driver, { forceFromDashboard: true }).catch(
+            () => {},
+          );
+          return "RESET_PICKUP";
+        }
       } else {
         reportStatus(
           "PROCEED_STAGE2_MISSING",
@@ -720,10 +859,30 @@ async function fastBookingAttempt(driver) {
         );
       }
     } else {
+      if (slotStage2.foundAny) {
+        reportStatus(
+          "SLOT_STAGE2_SELECT_FAILED",
+          "Time slots were visible after proceed but none could be selected; resetting pickup",
+        );
+        return "RESET_PICKUP";
+      }
+
       reportStatus(
         "SLOT_STAGE2_NONE",
         "No post-proceed time-slot list detected (ok)",
       );
+    }
+
+    // Final guard: never report SUCCESS if the app is on a blank/white screen.
+    if (await isProbablyBlankPage(driver)) {
+      reportStatus(
+        "WHITE_SCREEN_GUARD",
+        "Detected blank/white page; recovering and retrying",
+      );
+      await goToAppointmentPage(driver, { forceFromDashboard: true }).catch(
+        () => {},
+      );
+      return "RESET_PICKUP";
     }
 
     reportStatus("SUCCESS", "Success");
@@ -755,6 +914,61 @@ async function waitForLoadingOverlayToClear(driver, timeoutMs = 15_000) {
     await sleep(500);
   }
   return false;
+}
+
+async function switchToNewWindowIfOpened(driver, beforeHandles) {
+  const before = Array.isArray(beforeHandles) ? beforeHandles : [];
+  const after = await driver.getAllWindowHandles().catch(() => before);
+  if (after.length <= before.length) return { switched: false, handles: after };
+
+  const newOnes = after.filter((h) => !before.includes(h));
+  const target = newOnes[newOnes.length - 1] || after[after.length - 1];
+  await driver
+    .switchTo()
+    .window(target)
+    .catch(() => {});
+  return { switched: true, handles: after };
+}
+
+async function isProbablyBlankPage(driver) {
+  const url = await driver.getCurrentUrl().catch(() => "");
+  if (!url) return false;
+  if (url === "about:blank") return true;
+  if (url.startsWith("chrome-error://")) return true;
+
+  try {
+    const stats = await driver.executeScript(() => {
+      const body = document.body;
+      const txt = body ? (body.innerText || "").trim() : "";
+      const childCount = body ? body.children.length : 0;
+      const hasBooking = Boolean(
+        document.querySelector(".ofc-book-slot-block"),
+      );
+      const hasLogin = Boolean(
+        document.querySelector("input[formcontrolname='username']") ||
+        document.querySelector("input[formcontrolname='password']"),
+      );
+      const hasSpinner = Boolean(
+        document.querySelector(".ngx-spinner-overlay"),
+      );
+      return {
+        textLen: txt.length,
+        childCount,
+        hasBooking,
+        hasLogin,
+        hasSpinner,
+        readyState: document.readyState,
+      };
+    });
+
+    if (stats.hasSpinner) return false;
+    if (stats.hasBooking || stats.hasLogin) return false;
+
+    // White-screen symptom: app root exists but nothing rendered.
+    return stats.textLen < 20 && stats.childCount <= 1;
+  } catch {
+    return false;
+  }
 }
 
 async function refreshAndRecover(driver, reason, { timeoutMs = 15_000 } = {}) {
@@ -1139,6 +1353,10 @@ async function clickFirstAvailableTimeSlot(driver, timeoutMs = 2500) {
     }
   }
 
+  let foundAny = false;
+  let clickedAny = false;
+  let lastPickedText = null;
+
   while (Date.now() - start < timeoutMs) {
     // Prefer the known slots container when present (real DOM):
     // .ofc-appoinment-sloat-block .booking-time-buttons.slot_calender button.green-button
@@ -1186,9 +1404,13 @@ async function clickFirstAvailableTimeSlot(driver, timeoutMs = 2500) {
       }
     }
 
+    if (green.length > 0 || anyTime.length > 0) foundAny = true;
+
     const pick =
       green.length > 0 ? green[0] : anyTime.length > 0 ? anyTime[0] : null;
     if (pick) {
+      clickedAny = true;
+      lastPickedText = pick.txt;
       try {
         // eslint-disable-next-line no-await-in-loop
         await driver.executeScript(
@@ -1210,13 +1432,22 @@ async function clickFirstAvailableTimeSlot(driver, timeoutMs = 2500) {
             "SLOT_CLICK_NO_CONFIRM",
             `Clicked time slot but selection not confirmed yet: ${pick.txt}`,
           );
+          // Keep trying within timeout; do not claim success yet.
+          // eslint-disable-next-line no-await-in-loop
+          await sleep(250);
+          continue;
         }
 
         reportStatus(
           "SLOT_SELECTED",
           `Time slot selected: ${pick.txt}${green.length > 0 ? " (green)" : ""}`,
         );
-        return true;
+        return {
+          foundAny: true,
+          clicked: true,
+          confirmed: true,
+          text: pick.txt,
+        };
       } catch {
         // ignore and retry within timeout
       }
@@ -1226,29 +1457,78 @@ async function clickFirstAvailableTimeSlot(driver, timeoutMs = 2500) {
     await sleep(250);
   }
 
-  return false;
+  return {
+    foundAny,
+    clicked: clickedAny,
+    confirmed: false,
+    text: lastPickedText,
+  };
 }
 
 async function proceedIfAvailableSlotsVisible(driver) {
   // When a date is truly available, the UI shows available slots and a proceed button.
   // We don't finalize booking here; we just move forward to prove the flow is working.
-  const proceedBtn = await driver
-    .wait(
-      until.elementLocated(
-        By.xpath(
-          "//button[(contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'SELECT POST') and contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'PROCEED')) or (contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'BOOK') and contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'POST') and contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'APPOINTMENT'))]",
-        ),
-      ),
-      12_000,
-    )
+  const xpathSelectProceed =
+    "//button[(contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'SELECT POST') and contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'PROCEED'))]";
+  const xpathBookPost =
+    "//button[(contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'BOOK') and contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'POST') and contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'APPOINTMENT'))]";
+
+  const selectProceedBtn = await driver
+    .wait(until.elementLocated(By.xpath(xpathSelectProceed)), 12_000)
     .catch(() => null);
 
-  if (!proceedBtn) return false;
+  const proceedBtn =
+    selectProceedBtn ||
+    (await driver
+      .wait(until.elementLocated(By.xpath(xpathBookPost)), 2500)
+      .catch(() => null));
+
+  const kind = selectProceedBtn
+    ? "SELECT_POST_AND_PROCEED"
+    : proceedBtn
+      ? "BOOK_POST_APPOINTMENT"
+      : null;
+
+  if (!proceedBtn) return { clicked: false, kind: null, text: null };
 
   await driver.wait(until.elementIsVisible(proceedBtn), 5000).catch(() => {});
-  await jsClick(driver, proceedBtn);
-  reportStatus("PROCEEDED", "Proceeded to next step (SELECT/BOOK POST)");
-  return true;
+
+  const btnText = ((await proceedBtn.getText().catch(() => "")) || "").trim();
+  await driver
+    .executeScript(
+      "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+      proceedBtn,
+    )
+    .catch(() => {});
+  await sleep(150);
+
+  // Wait for enabled state (best-effort; aria-disabled is common on Angular buttons)
+  const enabled = await driver
+    .wait(async () => {
+      try {
+        const disabledAttr = await proceedBtn.getAttribute("disabled");
+        const ariaDisabled = await proceedBtn.getAttribute("aria-disabled");
+        return !disabledAttr && ariaDisabled !== "true";
+      } catch {
+        return true;
+      }
+    }, 8000)
+    .catch(() => true);
+
+  if (!enabled) {
+    reportStatus(
+      "PROCEED_DISABLED",
+      `Proceed button stayed disabled (${btnText || kind || "unknown"})`,
+    );
+    return { clicked: false, kind, text: btnText || null };
+  }
+
+  await safeClick(driver, proceedBtn);
+  reportStatus(
+    "PROCEEDED",
+    `Clicked proceed: ${btnText || kind || "(unknown)"}`,
+  );
+  return { clicked: true, kind, text: btnText || null };
 }
 // Login flow to fill in credentials and wait for user to complete CAPTCHA.
 async function login(driver) {
@@ -1986,9 +2266,6 @@ async function appointmentWatcher(driver) {
   let nextAttemptAtMs = Date.now();
 
   async function isOnAppointmentBookingPage() {
-    const u = await driver.getCurrentUrl().catch(() => "");
-    if (u.includes("/appointment") && !u.includes("/myappointment"))
-      return true;
     const bookingBlock = await driver
       .findElements(By.css(".ofc-book-slot-block"))
       .catch(() => []);

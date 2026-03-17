@@ -116,7 +116,7 @@ function normalizeDatePrefs(body) {
   };
 }
 
-function createUsersRouter({ store, pool, baseDir }) {
+function createUsersRouter({ store, pool, baseDir, profilesDir }) {
   const router = express.Router();
 
   function readBoolEnv(name) {
@@ -155,7 +155,7 @@ function createUsersRouter({ store, pool, baseDir }) {
       password,
       displayName,
       pickupPoint = "Accra",
-      headless,
+      headless = false,
       reschedule,
       autoStart,
     } = req.body || {};
@@ -442,7 +442,8 @@ function createUsersRouter({ store, pool, baseDir }) {
 
     // Best-effort cleanup of Chrome profile directory
     try {
-      const profileDir = path.join(baseDir, "profiles", user.id);
+      const root = profilesDir || path.join(baseDir, "profiles");
+      const profileDir = path.join(root, user.id);
       fs.rmSync(profileDir, { recursive: true, force: true });
     } catch {
       // ignore

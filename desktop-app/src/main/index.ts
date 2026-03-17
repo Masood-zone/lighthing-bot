@@ -1,14 +1,31 @@
-import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, globalShortcut } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
-import { startEmbeddedBackend } from './backendProcess'
+import { startEmbeddedBackend, stopEmbeddedBackend } from './embeddedBackend'
 
 let mainWindow: BrowserWindow | null = null
-let embeddedBackend: Awaited<ReturnType<typeof startEmbeddedBackend>> | null = null
-let isQuitting = false
+let runtimeApiUrl: string | undefined
 
-function createWindow(): void {
+function shouldOpenDevToolsOnStart(): boolean {
+  return (
+    process.argv.includes('--devtools') ||
+    process.env.LB_DEVTOOLS === '1' ||
+    process.env.LIGHTNINGBOT_DEVTOOLS === '1'
+  )
+}
+
+function withApiUrl(url: string, apiUrl: string): string {
+  try {
+    const u = new URL(url)
+    u.searchParams.set('apiUrl', apiUrl)
+    return u.toString()
+  } catch {
+    return url
+  }
+}
+
+function createWindow(opts?: { apiUrl?: string; openDevTools?: boolean }): BrowserWindow {
   // Create the browser window.
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -37,10 +54,23 @@ function createWindow(): void {
   // HMR for renderer base on electron-vite cli.
   // Load the remote URL for development or the local html file for production.
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    const base = process.env['ELECTRON_RENDERER_URL']
+    const url = opts?.apiUrl ? withApiUrl(base, opts.apiUrl) : base
+    mainWindow.loadURL(url)
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    const filePath = join(__dirname, '../renderer/index.html')
+    if (opts?.apiUrl) {
+      mainWindow.loadFile(filePath, { query: { apiUrl: opts.apiUrl } })
+    } else {
+      mainWindow.loadFile(filePath)
+    }
   }
+
+  if (opts?.openDevTools) {
+    mainWindow.webContents.openDevTools({ mode: 'right' })
+  }
+
+  return mainWindow
 }
 
 // This method will be called when Electron has finished
@@ -60,16 +90,32 @@ app.whenReady().then(async () => {
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
 
-  try {
-    embeddedBackend = await startEmbeddedBackend()
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    dialog.showErrorBox('Lightning Bot backend failed to start', message)
-    app.quit()
-    return
+  if (app.isPackaged) {
+    // Allow DevTools toggling in production builds.
+    globalShortcut.register('CommandOrControl+Shift+I', () => {
+      const win = BrowserWindow.getFocusedWindow() || mainWindow
+      win?.webContents.toggleDevTools()
+    })
   }
 
-  createWindow()
+  let backendError: unknown = null
+  try {
+    const started = await startEmbeddedBackend()
+    runtimeApiUrl = started?.apiUrl
+  } catch (err) {
+    backendError = err
+    console.error('[backend] failed to start:', err)
+  }
+
+  createWindow({
+    apiUrl: runtimeApiUrl,
+    openDevTools: shouldOpenDevToolsOnStart() || Boolean(backendError)
+  })
+
+  if (backendError) {
+    const message = backendError instanceof Error ? backendError.message : String(backendError)
+    dialog.showErrorBox('Lightning Bot backend failed to start', message)
+  }
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the
@@ -78,19 +124,12 @@ app.whenReady().then(async () => {
   })
 })
 
-app.on('before-quit', (event) => {
-  if (isQuitting) return
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll()
+})
 
-  event.preventDefault()
-  isQuitting = true
-
-  Promise.resolve(embeddedBackend?.stop())
-    .catch((error) => {
-      console.error('[embedded-backend] Failed to stop cleanly:', error)
-    })
-    .finally(() => {
-      app.quit()
-    })
+app.on('before-quit', () => {
+  stopEmbeddedBackend()
 })
 
 // Quit when all windows are closed, except on macOS. There, it's common

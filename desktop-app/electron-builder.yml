@@ -11,22 +11,24 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 asarUnpack:
   - resources/**
-  - node_modules/selenium-webdriver/**
+  - '**/selenium-webdriver/bin/**'
+
+# Bundle the existing backend project into the desktop build.
+# The Electron main process launches it as a child process.
 extraResources:
-  - from: ../backend/src
-    to: backend/src
+  - from: ../backend
+    to: backend
     filter:
-      - '**/*'
-  - from: ../backend/main
-    to: backend/main
-    filter:
-      - '**/*'
-  - from: ../backend/data
-    to: backend/data
-    filter:
-      - 'users.json'
-  - from: build/embedded-backend.env
-    to: backend/.env
+      - package.json
+      - pnpm-lock.yaml
+      - .env
+      - data/**
+      - profiles/**
+      - main/**
+      - src/**
+  # Portable backend dependencies (generated during build).
+  - from: .backend-deps/node_modules
+    to: backend/node_modules
 win:
   executableName: LightningBot
   icon: build/icon.ico

@@ -2,7 +2,10 @@ node_modules
 dist
 dist-win-noedit
 dist-win
+dist-win-*
 out
+.backend-deps
+.backend-deploy-test
 .DS_Store
 .eslintcache
 *.log*
