@@ -22,6 +22,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
+    "nodemailer": "^6.10.1",
     "selenium-webdriver": "^4.40.0"
   },
   "devDependencies": {

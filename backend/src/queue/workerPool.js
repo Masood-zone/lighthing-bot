@@ -24,6 +24,21 @@ function safeOneLine(value) {
     .trim();
 }
 
+function extractIsoDateFromText(text) {
+  const m = String(text || "").match(/\b\d{4}-\d{2}-\d{2}\b/);
+  return m ? m[0] : "";
+}
+
+function extractTimeSlotFromText(text) {
+  const raw = String(text || "");
+  const m = raw.match(/time\s+slot\s+selected\s*:\s*(.+)$/i);
+  if (!m) return "";
+  let slot = String(m[1] || "").trim();
+  // Drop trailing annotations like "(green)".
+  slot = slot.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  return slot;
+}
+
 function logWorkerToBackendConsole(sessionId, level, message) {
   const ts = nowIso();
   const msg = safeOneLine(message);
@@ -63,15 +78,30 @@ function logSessionLifecycle(sessionId, session, action, detail = "") {
 
 class WorkerPool {
   /**
-   * @param {{ store: import('../store/sessionStore').SessionStore, maxConcurrent: number, workerEntry: string, baseDir: string, profilesDir?: string }} opts
+   * @param {{ store: import('../store/sessionStore').SessionStore, maxConcurrent: number, workerEntry: string, baseDir: string, profilesDir?: string, notificationService?: any }} opts
    */
-  constructor({ store, maxConcurrent, workerEntry, baseDir, profilesDir }) {
+  constructor({
+    store,
+    maxConcurrent,
+    workerEntry,
+    baseDir,
+    profilesDir,
+    notificationService,
+  }) {
     this.store = store;
     // Allow disabling worker execution entirely by setting MAX_CONCURRENT=0.
     this.maxConcurrent = Math.max(0, Number(maxConcurrent ?? 1));
     this.workerEntry = workerEntry;
     this.baseDir = baseDir;
     this.profilesDir = profilesDir || path.join(this.baseDir, "profiles");
+
+    this.notificationService = notificationService || null;
+
+    /** @type {Map<string, {dateKey?: string, timeSlot?: string}>} */
+    this.bookingContext = new Map();
+
+    /** @type {Set<string>} */
+    this.notifiedSuccess = new Set();
 
     /** @type {string[]} */
     this.queue = [];
@@ -181,6 +211,9 @@ class WorkerPool {
   _startSession(sessionId) {
     const session = this.store.getSession(sessionId);
     if (!session) return;
+
+    this.bookingContext.delete(sessionId);
+    this.notifiedSuccess.delete(sessionId);
 
     this.store.setStatus(sessionId, "RUNNING", "Starting worker");
     this.store.setQueueTimes(sessionId, { startedAt: nowIso() });
@@ -304,6 +337,24 @@ class WorkerPool {
       if (msg.type === "status") {
         const { state, message } = msg;
 
+        // Capture booking context from worker messages (best-effort).
+        if (typeof state === "string") {
+          const prev = this.bookingContext.get(sessionId) || {};
+          const ctx = { ...prev };
+
+          if (state === "DATE_SELECTED" && typeof message === "string") {
+            const dateKey = extractIsoDateFromText(message);
+            if (dateKey) ctx.dateKey = dateKey;
+          }
+
+          if (state === "SLOT_SELECTED" && typeof message === "string") {
+            const timeSlot = extractTimeSlotFromText(message);
+            if (timeSlot) ctx.timeSlot = timeSlot;
+          }
+
+          this.bookingContext.set(sessionId, ctx);
+        }
+
         logWorkerToBackendConsole(
           sessionId,
           "info",
@@ -315,6 +366,41 @@ class WorkerPool {
           this.store.setStatus(sessionId, "BLOCKED", message || "Blocked");
         } else if (state === "COMPLETED") {
           this.store.setStatus(sessionId, "COMPLETED", message || "Completed");
+
+          // Non-blocking notification: enqueue email for admins ASAP.
+          if (!this.notifiedSuccess.has(sessionId)) {
+            this.notifiedSuccess.add(sessionId);
+
+            const svc = this.notificationService;
+            if (svc && typeof svc.enqueueBookingSuccess === "function") {
+              const ctx = this.bookingContext.get(sessionId) || {};
+              const queued = svc.enqueueBookingSuccess({
+                sessionId,
+                session,
+                booking: { ...ctx },
+              });
+
+              if (queued) {
+                this.store.appendLog(
+                  sessionId,
+                  "info",
+                  "Queued email notification to administrators",
+                );
+              } else {
+                this.store.appendLog(
+                  sessionId,
+                  "warn",
+                  "Failed to queue administrator email notification (queue full)",
+                );
+              }
+            } else {
+              this.store.appendLog(
+                sessionId,
+                "warn",
+                "Email notifications not configured on server",
+              );
+            }
+          }
         } else {
           this.store.setStatus(
             sessionId,
@@ -336,6 +422,8 @@ class WorkerPool {
 
     child.on("exit", (code, signal) => {
       this.active.delete(sessionId);
+      this.bookingContext.delete(sessionId);
+      this.notifiedSuccess.delete(sessionId);
       this.store.setRuntime(sessionId, { exitCode: code, signal });
       this.store.setQueueTimes(sessionId, { finishedAt: nowIso() });
 

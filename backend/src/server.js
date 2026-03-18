@@ -13,8 +13,10 @@ const cors = require("cors");
 
 const { SessionStore } = require("./store/sessionStore");
 const { UserStore } = require("./store/userStore");
+const { AdminRecipientStore } = require("./store/adminRecipientStore");
 const { WorkerPool } = require("./queue/workerPool");
 const { AuthService } = require("./services/authService");
+const { EmailNotificationService } = require("./services/notifications");
 const { requireAuth } = require("./middleware/requireAuth");
 const { createRoutes } = require("./routes");
 
@@ -52,8 +54,14 @@ app.get("/api/health", (req, res) => {
 
 const store = new SessionStore({ dataDir: DATA_DIR });
 const userStore = new UserStore({ dataDir: DATA_DIR });
+const adminRecipientStore = new AdminRecipientStore({ dataDir: DATA_DIR });
 const authService = new AuthService({
   tokenTtlMs: Number(process.env.AUTH_TOKEN_TTL_MS || 1000 * 60 * 60 * 12),
+});
+
+const notificationService = new EmailNotificationService({
+  adminRecipientStore,
+  sessionStore: store,
 });
 
 const ensure = userStore.ensureAdminFromEnv();
@@ -79,6 +87,7 @@ const pool = new WorkerPool({
   workerEntry,
   baseDir: BASE_DIR,
   profilesDir: PROFILES_DIR,
+  notificationService,
 });
 
 const requireAuthMiddleware = requireAuth({ authService, userStore });
@@ -89,6 +98,7 @@ app.use(
     baseDir: BASE_DIR,
     profilesDir: PROFILES_DIR,
     userStore,
+    adminRecipientStore,
     authService,
     requireAuthMiddleware,
   }),
