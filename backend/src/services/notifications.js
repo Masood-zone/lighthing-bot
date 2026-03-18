@@ -32,7 +32,6 @@ function safeOneLine(value) {
 function getSmtpTransportConfigFromEnv() {
   const service = safeOneLine(process.env.SMTP_SERVICE);
   const hostRaw = safeOneLine(process.env.SMTP_HOST);
-
   const port = Number(process.env.SMTP_PORT || 587);
 
   const secureEnv = readBoolEnv("SMTP_SECURE");
