@@ -1,0 +1,20 @@
+{
+  "admins": {
+    "bc886709-7a82-4286-9988-31a7febc2dbf": {
+      "id": "bc886709-7a82-4286-9988-31a7febc2dbf",
+      "email": "danny1ktv@gmail.com",
+      "name": "Daniel",
+      "active": true,
+      "createdAt": "2026-03-18T17:46:26.676Z",
+      "updatedAt": "2026-03-18T17:46:26.676Z"
+    },
+    "ce73ed54-88a8-4f7f-81de-f573870740dd": {
+      "id": "ce73ed54-88a8-4f7f-81de-f573870740dd",
+      "email": "adomakogodfred090@gmail.com",
+      "name": "Mr Fredrick",
+      "active": true,
+      "createdAt": "2026-03-18T17:46:42.320Z",
+      "updatedAt": "2026-03-18T17:46:42.320Z"
+    }
+  }
+}

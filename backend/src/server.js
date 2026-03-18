@@ -54,7 +54,10 @@ app.get("/api/health", (req, res) => {
 
 const store = new SessionStore({ dataDir: DATA_DIR });
 const userStore = new UserStore({ dataDir: DATA_DIR });
-const adminRecipientStore = new AdminRecipientStore({ dataDir: DATA_DIR });
+const adminRecipientStore = new AdminRecipientStore({
+  dataDir: DATA_DIR,
+  seedFilePath: path.join(BASE_DIR, "admins.json"),
+});
 const authService = new AuthService({
   tokenTtlMs: Number(process.env.AUTH_TOKEN_TTL_MS || 1000 * 60 * 60 * 12),
 });

@@ -33,18 +33,23 @@ function isTransientFsError(err) {
 
 class AdminRecipientStore {
   /**
-   * @param {{ dataDir: string }} opts
+   * @param {{ dataDir: string, seedFilePath?: string }} opts
    */
-  constructor({ dataDir }) {
+  constructor({ dataDir, seedFilePath } = {}) {
     this.dataDir = dataDir;
     this.filePath = path.join(this.dataDir, "admins.json");
+    this.seedFilePath =
+      seedFilePath && typeof seedFilePath === "string" ? seedFilePath : "";
     this.state = { admins: {} };
     this._load();
   }
 
   _load() {
     try {
-      if (!fs.existsSync(this.filePath)) return;
+      if (!fs.existsSync(this.filePath)) {
+        this._seedFromFile();
+        return;
+      }
       const raw = fs.readFileSync(this.filePath, "utf8");
       const parsed = safeJsonParse(raw, { admins: {} });
       if (parsed && typeof parsed === "object" && parsed.admins) {
@@ -52,6 +57,25 @@ class AdminRecipientStore {
       }
     } catch {
       // ignore
+    }
+  }
+
+  _seedFromFile() {
+    if (!this.seedFilePath) return false;
+
+    try {
+      if (!fs.existsSync(this.seedFilePath)) return false;
+      const raw = fs.readFileSync(this.seedFilePath, "utf8");
+      const parsed = safeJsonParse(raw, null);
+
+      if (!parsed || typeof parsed !== "object") return false;
+      if (!parsed.admins || typeof parsed.admins !== "object") return false;
+
+      this.state = { admins: parsed.admins };
+      this._save();
+      return true;
+    } catch {
+      return false;
     }
   }
 
