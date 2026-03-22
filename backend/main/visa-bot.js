@@ -442,9 +442,10 @@ async function findGreenAvailableDateWithinRange(
   driver,
   { excludeKeys = new Set() } = {},
 ) {
-  // Scan visible calendar cells, find green (#14a38b), parse their date from
-  // (day number + current calendar month/year header) and only click if within
+  // Scan visible calendar cells, find green (#14a38b), and only click if within
   // allowed MIN_DATE..MAX_DATE.
+  // NOTE: Clicking/confirming selection is done in the browser context to avoid
+  // stale-element flakiness when the calendar re-renders.
   const allowed = getAllowedDateRange();
   reportStatus(
     "DATE_SCAN",
@@ -461,171 +462,397 @@ async function findGreenAvailableDateWithinRange(
       "Calendar header not found; cannot parse dates reliably",
     );
     reportLog("warn", "Calendar header not found; cannot parse dates reliably");
-    return { clicked: false, outOfRangeFound: false };
+    return {
+      clicked: false,
+      selected: false,
+      outOfRangeFound: false,
+      greenFound: 0,
+      greenInRangeFound: 0,
+    };
   }
 
   const minMs = allowed.min ? allowed.min.getTime() : null;
   const maxMs = allowed.max ? allowed.max.getTime() : null;
 
-  // Fast path: scan all enabled date buttons in one browser-side pass.
+  const excludeArr =
+    excludeKeys && typeof excludeKeys.has === "function"
+      ? Array.from(excludeKeys)
+      : [];
+
   const scan = await driver
-    .executeScript(
-      (year, monthIndex, minMsArg, maxMsArg) => {
-        const parse = (color) => {
-          const c = String(color || "")
-            .trim()
-            .toLowerCase();
-          const m = c.match(
-            /rgba?\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\)/,
-          );
-          if (!m) return null;
-          return {
-            r: Number(m[1]),
-            g: Number(m[2]),
-            b: Number(m[3]),
-            a: m[4] === undefined ? 1 : Number(m[4]),
+    .executeAsyncScript(
+      (
+        defaultYear,
+        defaultMonthIndex,
+        minMsArg,
+        maxMsArg,
+        excludeArg,
+        done,
+      ) => {
+        try {
+          const exclude = new Set(Array.isArray(excludeArg) ? excludeArg : []);
+
+          const toInt = (v) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? n : null;
           };
-        };
 
-        const isGreen = (color) => {
-          const rgb = parse(color);
-          return (
-            rgb && rgb.r === 20 && rgb.g === 163 && rgb.b === 139 && rgb.a !== 0
-          );
-        };
-
-        const buttons = Array.from(
-          document.querySelectorAll(
-            "button.mat-calendar-body-cell:not(.mat-calendar-body-disabled)",
-          ),
-        );
-
-        const greens = [];
-        let greenTotal = 0;
-        let outOfRangeTotal = 0;
-
-        for (const btn of buttons) {
-          try {
-            const ariaPressed = btn.getAttribute("aria-pressed");
-            if (ariaPressed === "true") continue;
-
-            const content = btn.querySelector(
-              ".mat-calendar-body-cell-content",
+          const parseRgb = (color) => {
+            const c = String(color || "")
+              .trim()
+              .toLowerCase();
+            const m = c.match(
+              /rgba?\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\)/,
             );
-            if (!content) continue;
+            if (!m) return null;
+            return {
+              r: Number(m[1]),
+              g: Number(m[2]),
+              b: Number(m[3]),
+              a: m[4] === undefined ? 1 : Number(m[4]),
+            };
+          };
 
-            // Skip selected cells (sometimes selection is reflected on content class).
-            const contentClass = String(content.getAttribute("class") || "");
-            if (contentClass.includes("mat-calendar-body-selected")) continue;
+          const isGreen = (color) => {
+            const rgb = parseRgb(color);
+            if (!rgb) return false;
+            if (rgb.a === 0) return false;
+            // Some browsers return slightly different channel values; allow small tolerance.
+            const tol = 2;
+            return (
+              Math.abs(rgb.r - 20) <= tol &&
+              Math.abs(rgb.g - 163) <= tol &&
+              Math.abs(rgb.b - 139) <= tol
+            );
+          };
 
-            const day = Number(String(content.textContent || "").trim());
-            if (!Number.isFinite(day) || day <= 0 || day > 31) continue;
+          const monthMap = {
+            january: 0,
+            february: 1,
+            march: 2,
+            april: 3,
+            may: 4,
+            june: 5,
+            july: 6,
+            august: 7,
+            september: 8,
+            october: 9,
+            november: 10,
+            december: 11,
+          };
 
-            const bg1 = getComputedStyle(content).backgroundColor;
-            const bg2 = getComputedStyle(btn).backgroundColor;
-            if (!(isGreen(bg1) || isGreen(bg2))) continue;
+          const parseDateFromAria = (label) => {
+            const s = String(label || "").trim();
+            if (!s) return null;
 
-            greenTotal += 1;
-
-            const dateMs = Date.UTC(year, monthIndex, day);
-            if (minMsArg != null && dateMs < minMsArg) {
-              outOfRangeTotal += 1;
-              continue;
+            // Example: "March 22, 2026"
+            let m = s.match(
+              /([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})/,
+            );
+            if (m) {
+              const monthIndex = monthMap[String(m[1] || "").toLowerCase()];
+              const day = toInt(m[2]);
+              const year = toInt(m[3]);
+              if (Number.isFinite(monthIndex) && day != null && year != null) {
+                return { year, monthIndex, day };
+              }
             }
-            if (maxMsArg != null && dateMs > maxMsArg) {
-              outOfRangeTotal += 1;
-              continue;
+
+            // Example: "22 March 2026"
+            m = s.match(/(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+),?\s+(\d{4})/);
+            if (m) {
+              const day = toInt(m[1]);
+              const monthIndex = monthMap[String(m[2] || "").toLowerCase()];
+              const year = toInt(m[3]);
+              if (Number.isFinite(monthIndex) && day != null && year != null) {
+                return { year, monthIndex, day };
+              }
             }
 
-            greens.push([day, btn]);
-          } catch {
-            // ignore
+            return null;
+          };
+
+          const pad2 = (n) => String(n).padStart(2, "0");
+          const makeKey = (y, mIdx, d) => `${y}-${pad2(mIdx + 1)}-${pad2(d)}`;
+
+          const pickTarget = (el) => {
+            if (!el) return null;
+            const tag = String(el.tagName || "").toLowerCase();
+            if (tag === "button" || el.getAttribute("role") === "button") {
+              return el;
+            }
+            const btn =
+              el.querySelector("button.mat-calendar-body-cell") ||
+              el.querySelector("button");
+            return btn || el;
+          };
+
+          const cells = Array.from(
+            document.querySelectorAll(
+              "button.mat-calendar-body-cell:not(.mat-calendar-body-disabled), td.mat-calendar-body-cell:not(.mat-calendar-body-disabled)",
+            ),
+          );
+
+          const candidates = [];
+          let greenTotal = 0;
+          let outOfRangeTotal = 0;
+
+          for (const cell of cells) {
+            try {
+              const target = pickTarget(cell);
+              if (!target) continue;
+
+              const disabledAttr = target.getAttribute("disabled");
+              const ariaDisabled = target.getAttribute("aria-disabled");
+              if (disabledAttr != null || ariaDisabled === "true") continue;
+
+              const content =
+                target.querySelector(".mat-calendar-body-cell-content") ||
+                cell.querySelector(".mat-calendar-body-cell-content");
+              if (!content) continue;
+
+              const contentClass = String(content.getAttribute("class") || "");
+              if (contentClass.includes("mat-calendar-body-selected")) continue;
+
+              const ariaPressed = target.getAttribute("aria-pressed");
+              if (ariaPressed === "true") continue;
+
+              const day = toInt(String(content.textContent || "").trim());
+              if (day == null || day <= 0 || day > 31) continue;
+
+              const colors = [];
+              const pushStyle = (el, prop) => {
+                try {
+                  colors.push(getComputedStyle(el)[prop]);
+                } catch {
+                  // ignore
+                }
+              };
+
+              pushStyle(content, "backgroundColor");
+              pushStyle(content, "color");
+              pushStyle(content, "borderColor");
+              pushStyle(target, "backgroundColor");
+              pushStyle(target, "color");
+              pushStyle(target, "borderColor");
+
+              if (!colors.some((c) => isGreen(c))) continue;
+
+              greenTotal += 1;
+
+              const ariaLabel =
+                target.getAttribute("aria-label") ||
+                content.getAttribute("aria-label") ||
+                "";
+              const parsed = parseDateFromAria(ariaLabel);
+
+              const y = parsed?.year ?? defaultYear;
+              const mIdx = parsed?.monthIndex ?? defaultMonthIndex;
+              const d = parsed?.day ?? day;
+
+              const dateMs = Date.UTC(y, mIdx, d);
+              if (minMsArg != null && dateMs < minMsArg) {
+                outOfRangeTotal += 1;
+                continue;
+              }
+              if (maxMsArg != null && dateMs > maxMsArg) {
+                outOfRangeTotal += 1;
+                continue;
+              }
+
+              const dateKey = makeKey(y, mIdx, d);
+              candidates.push({ dateKey, dateMs, target });
+            } catch {
+              // ignore cell errors
+            }
           }
-        }
 
-        greens.sort((a, b) => a[0] - b[0]);
-        return {
-          scanned: buttons.length,
-          greenTotal,
-          outOfRangeTotal,
-          greens,
-        };
+          candidates.sort((a, b) => a.dateMs - b.dateMs);
+
+          const selectedMatches = (expectedKey) => {
+            try {
+              const selBtn =
+                document.querySelector(
+                  "button.mat-calendar-body-cell[aria-pressed='true']",
+                ) || null;
+              if (selBtn) {
+                const lbl = selBtn.getAttribute("aria-label") || "";
+                const parsed = parseDateFromAria(lbl);
+                const content = selBtn.querySelector(
+                  ".mat-calendar-body-cell-content",
+                );
+                const day = toInt(String(content?.textContent || "").trim());
+                const y = parsed?.year ?? defaultYear;
+                const mIdx = parsed?.monthIndex ?? defaultMonthIndex;
+                const d = parsed?.day ?? day;
+                const key = makeKey(y, mIdx, d);
+                return key === expectedKey;
+              }
+
+              const selContent =
+                document.querySelector(
+                  ".mat-calendar-body-cell-content.mat-calendar-body-selected",
+                ) || null;
+              if (selContent) {
+                const btn =
+                  selContent.closest("button.mat-calendar-body-cell") ||
+                  selContent.closest("td.mat-calendar-body-cell") ||
+                  null;
+                const lbl = btn?.getAttribute("aria-label") || "";
+                const parsed = parseDateFromAria(lbl);
+                const day = toInt(String(selContent.textContent || "").trim());
+                const y = parsed?.year ?? defaultYear;
+                const mIdx = parsed?.monthIndex ?? defaultMonthIndex;
+                const d = parsed?.day ?? day;
+                const key = makeKey(y, mIdx, d);
+                return key === expectedKey;
+              }
+            } catch {
+              // ignore
+            }
+            return false;
+          };
+
+          let clickedAny = false;
+
+          const finish = (payload) => {
+            done({
+              scanned: cells.length,
+              greenTotal,
+              outOfRangeTotal,
+              greensInRangeTotal: candidates.length,
+              outOfRangeFound: outOfRangeTotal > 0,
+              clickedAny,
+              ...payload,
+            });
+          };
+
+          const tryIdx = (idx) => {
+            if (idx >= candidates.length) {
+              finish({ clicked: clickedAny, selected: false, dateKey: null });
+              return;
+            }
+
+            const cand = candidates[idx];
+            if (exclude.has(cand.dateKey)) {
+              tryIdx(idx + 1);
+              return;
+            }
+
+            try {
+              cand.target.scrollIntoView({
+                block: "center",
+                inline: "nearest",
+              });
+            } catch {
+              // ignore
+            }
+
+            try {
+              cand.target.click();
+              clickedAny = true;
+            } catch {
+              try {
+                const content = cand.target.querySelector(
+                  ".mat-calendar-body-cell-content",
+                );
+                if (content) {
+                  content.click();
+                  clickedAny = true;
+                }
+              } catch {
+                // ignore
+              }
+            }
+
+            setTimeout(() => {
+              const ok =
+                selectedMatches(cand.dateKey) ||
+                cand.target.getAttribute("aria-pressed") === "true" ||
+                (() => {
+                  const content = cand.target.querySelector(
+                    ".mat-calendar-body-cell-content",
+                  );
+                  if (!content) return false;
+                  const cls = String(content.getAttribute("class") || "");
+                  return (
+                    cls.includes("mat-calendar-body-selected") ||
+                    cls.includes("mat-calendar-body-active")
+                  );
+                })();
+
+              if (ok) {
+                finish({
+                  clicked: true,
+                  selected: true,
+                  dateKey: cand.dateKey,
+                  dateIso: cand.dateKey,
+                });
+              } else {
+                tryIdx(idx + 1);
+              }
+            }, 120);
+          };
+
+          if (candidates.length === 0) {
+            finish({ clicked: false, selected: false, dateKey: null });
+            return;
+          }
+
+          tryIdx(0);
+        } catch {
+          done(null);
+        }
       },
       header.year,
       header.monthIndex,
       minMs,
       maxMs,
+      excludeArr,
     )
     .catch(() => null);
 
   if (!scan) {
-    reportStatus("DATE_SCAN_FAILED", "Calendar scan failed; will reset pickup");
-    reportLog("warn", "Calendar scan failed (executeScript returned null)");
-    return { clicked: false, outOfRangeFound: false };
+    reportStatus("DATE_SCAN_FAILED", "Calendar scan failed; will retry");
+    reportLog(
+      "warn",
+      "Calendar scan failed (executeAsyncScript returned null)",
+    );
+    return {
+      clicked: false,
+      selected: false,
+      outOfRangeFound: false,
+      greenFound: 0,
+      greenInRangeFound: 0,
+    };
   }
 
   const greenFound = Number(scan.greenTotal) || 0;
-  const greenInRangeFound = Array.isArray(scan.greens) ? scan.greens.length : 0;
-  const outOfRangeFound = (Number(scan.outOfRangeTotal) || 0) > 0;
+  const greenInRangeFound = Number(scan.greensInRangeTotal) || 0;
+  const outOfRangeFound = Boolean(scan.outOfRangeFound);
 
   reportLog(
     "info",
     `Calendar month context: ${header.year}-${String(header.monthIndex + 1).padStart(2, "0")} (cells: ${Number(scan.scanned) || 0}, green: ${greenFound}, in-range: ${greenInRangeFound})`,
   );
 
-  // Attempt candidates in order; pick the first that confirms selection.
-  const greens = Array.isArray(scan.greens) ? scan.greens : [];
-  for (const entry of greens) {
-    const day = Number(entry?.[0]);
-    const target = entry?.[1];
-    if (!Number.isFinite(day) || !target) continue;
-
-    const dateKey = `${header.year}-${String(header.monthIndex + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-    if (
-      excludeKeys &&
-      typeof excludeKeys.has === "function" &&
-      excludeKeys.has(dateKey)
-    ) {
-      continue;
-    }
-
-    try {
-      await driver.executeScript(
-        "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
-        target,
-      );
-      // Small settle; keep fast.
-      await sleep(40);
-
-      reportStatus(
-        "DATE",
-        `Selecting green available date (in range): ${dateKey}`,
-      );
-      await safeClick(driver, target);
-
-      const selected = await driver
-        .wait(async () => isDateSelected(driver, target), 2500)
-        .catch(() => false);
-      if (!selected) {
-        reportStatus(
-          "DATE_CLICK_NO_CONFIRM",
-          `Clicked green date but selection not confirmed: ${dateKey}`,
-        );
-        continue;
-      }
-
-      reportStatus("DATE_SELECTED", `Clicked in-range green date ${dateKey}`);
-      return {
-        clicked: true,
-        outOfRangeFound,
-        dateKey,
-        dateIso: dateKey,
-      };
-    } catch {
-      // ignore and try next candidate
-    }
+  if (scan.selected && scan.dateKey) {
+    reportStatus(
+      "DATE_SELECTED",
+      `Clicked in-range green date ${scan.dateKey}`,
+    );
+    return {
+      clicked: true,
+      selected: true,
+      outOfRangeFound,
+      dateKey: scan.dateKey,
+      dateIso: scan.dateIso || scan.dateKey,
+      greenFound,
+      greenInRangeFound,
+    };
   }
 
+  const clickedAny = Boolean(scan.clickedAny);
   if (greenFound === 0) {
     reportStatus(
       "NO_GREEN_DATE",
@@ -634,16 +861,27 @@ async function findGreenAvailableDateWithinRange(
   } else if (greenInRangeFound === 0) {
     reportStatus(
       "NO_IN_RANGE_GREEN",
-      `Found ${greenFound} green date(s), but none within allowed range; will reset pickup`,
+      `Found ${greenFound} green date(s), but none within allowed range; will keep scanning (no pickup reset)`,
+    );
+  } else if (clickedAny) {
+    reportStatus(
+      "DATE_CLICK_NO_CONFIRM",
+      `Clicked green date(s) (${greenInRangeFound} in-range) but selection not confirmed yet; will retry (no pickup reset)`,
     );
   } else {
     reportStatus(
       "NO_DATE_CLICK",
-      `Found ${greenFound} green date(s) (${greenInRangeFound} in-range) but failed to click; will reset pickup`,
+      `Found ${greenFound} green date(s) (${greenInRangeFound} in-range) but failed to select; will retry (no pickup reset)`,
     );
   }
 
-  return { clicked: false, outOfRangeFound };
+  return {
+    clicked: clickedAny,
+    selected: false,
+    outOfRangeFound,
+    greenFound,
+    greenInRangeFound,
+  };
 }
 
 async function waitForLoadingOverlay(
@@ -670,8 +908,7 @@ async function waitForLoadingOverlay(
 }
 
 async function checkApplicantCheckbox(driver) {
-  await confirmApplicant(driver);
-  return true;
+  return confirmApplicant(driver);
 }
 
 async function waitForAvailableSlotHeader(driver, timeoutMs = 4000) {
@@ -723,12 +960,55 @@ async function resetPickup(driver) {
 }
 
 // Core algorithm (strict):
-// SELECT_PICKUP -> DATE -> APPLICANT -> SLOT -> PROCEED -> SUCCESS
-// or RESET_PICKUP -> LOOP
+// (PENDING) APPLICANT -> SELECT_PICKUP -> DATE -> SLOT -> PROCEED -> SUCCESS
+// (RESCHEDULE) SELECT_PICKUP -> DATE -> SLOT -> PROCEED -> SUCCESS
+// NOTE: We do not do the old "reset pickup" loop anymore; retries happen on the
+// next attempt tick without toggling pickup.
 async function fastBookingAttempt(driver) {
   try {
     reportStatus("ALGO", "Starting booking attempt (green-date algorithm)");
-    await selectPickupAccra(driver);
+
+    // Stabilize first.
+    await waitForLoadingOverlayToClear(driver, 8_000).catch(() => true);
+    await dismissAnyOpenOverlays(driver).catch(() => {});
+
+    // Requirement: check the Applicant List checkbox ASAP in PENDING mode.
+    if (!CONFIG.RESCHEDULE) {
+      reportStatus("APPLICANT", "Checking applicant checkbox (early)");
+      await checkApplicantCheckbox(driver).catch(() => false);
+    }
+
+    // If we're already past calendar selection (slots visible or a date already
+    // selected), do not reselect/toggle pickup again.
+    const alreadySelectedDate = await driver
+      .executeScript(() => {
+        return Boolean(
+          document.querySelector(
+            "button.mat-calendar-body-cell[aria-pressed='true']",
+          ) ||
+          document.querySelector(
+            ".mat-calendar-body-cell-content.mat-calendar-body-selected",
+          ) ||
+          document.querySelector(
+            ".mat-calendar-body-cell-content.mat-calendar-body-active",
+          ),
+        );
+      })
+      .catch(() => false);
+
+    const alreadyOnSlots = await waitForAvailableSlotHeader(driver, 350).catch(
+      () => false,
+    );
+
+    if (!alreadyOnSlots && !alreadySelectedDate) {
+      // Refresh pickup availability (but only while we're still in calendar stage).
+      await selectPickupAccra(driver);
+
+      // Some UIs may re-render on pickup selection; ensure the checkbox stays selected.
+      if (!CONFIG.RESCHEDULE) {
+        await checkApplicantCheckbox(driver).catch(() => false);
+      }
+    }
 
     // NEW behavior:
     // - If multiple in-range green dates exist, try them in order until we see the
@@ -736,62 +1016,78 @@ async function fastBookingAttempt(driver) {
     // - If a newly green date appears while we're trying (e.g. 23rd shows up after
     //   26th), the next scan will pick it.
     const triedDateKeys = new Set();
-    let headerOk = false;
+    let headerOk = alreadyOnSlots;
 
-    for (let i = 0; i < 8; i += 1) {
-      const dateScan = await findGreenAvailableDateWithinRange(driver, {
-        excludeKeys: triedDateKeys,
-      });
-
-      if (!dateScan.clicked) {
-        // If we cannot click any more in-range green dates, we must reset pickup and loop.
-        return "RESET_PICKUP";
-      }
-
-      if (dateScan.dateKey) triedDateKeys.add(dateScan.dateKey);
-
-      reportStatus(
-        "OVERLAY",
-        `Waiting for booking UI after date selection: ${dateScan.dateIso || dateScan.dateKey || "(unknown)"}`,
-      );
-      const cleared = await waitForLoadingOverlayToClear(driver, 8_000).catch(
-        () => true,
-      );
-      if (!cleared) {
-        reportStatus(
-          "OVERLAY_TIMEOUT",
-          "Loading overlay stuck after date selection; stabilizing",
-        );
-        await refreshAndRecover(driver, "loading overlay stuck after date", {
-          timeoutMs: 20_000,
-        }).catch(() => {});
-      }
-
-      await dismissAnyOpenOverlays(driver).catch(() => {});
-
-      reportStatus("APPLICANT", "Checking applicant checkbox");
-      await checkApplicantCheckbox(driver).catch(() => null);
-
+    // If we already have a selected date, wait briefly for slots to appear.
+    if (!headerOk && alreadySelectedDate) {
       reportStatus(
         "HEADER",
-        `Waiting for Available Slot header (date ${dateScan.dateIso || dateScan.dateKey || "?"})`,
+        "Date already selected; waiting for Available Slot header",
       );
       headerOk = await waitForAvailableSlotHeader(driver, 2500);
-      if (headerOk) break;
+    }
 
-      reportStatus(
-        "HEADER_MISSING_DATE",
-        `No Available Slot header for ${dateScan.dateIso || dateScan.dateKey || "(unknown)"}; trying next green date`,
-      );
-      await sleep(80);
+    // Otherwise scan for in-range green dates and click one.
+    if (!headerOk) {
+      for (let i = 0; i < 8; i += 1) {
+        const dateScan = await findGreenAvailableDateWithinRange(driver, {
+          excludeKeys: triedDateKeys,
+        });
+
+        if (!dateScan.selected) {
+          if (dateScan.greenFound === 0) return "NO_GREEN_DATE";
+          if (dateScan.greenInRangeFound === 0) return "NO_IN_RANGE_GREEN";
+          // We may have clicked but not confirmed yet; retry quickly without
+          // touching pickup again.
+          await dismissAnyOpenOverlays(driver).catch(() => {});
+          // eslint-disable-next-line no-await-in-loop
+          await sleep(80);
+          continue;
+        }
+
+        if (dateScan.dateKey) triedDateKeys.add(dateScan.dateKey);
+
+        reportStatus(
+          "OVERLAY",
+          `Waiting for booking UI after date selection: ${dateScan.dateIso || dateScan.dateKey || "(unknown)"}`,
+        );
+        const cleared = await waitForLoadingOverlayToClear(driver, 8_000).catch(
+          () => true,
+        );
+        if (!cleared) {
+          reportStatus(
+            "OVERLAY_TIMEOUT",
+            "Loading overlay stuck after date selection; stabilizing",
+          );
+          await refreshAndRecover(driver, "loading overlay stuck after date", {
+            timeoutMs: 20_000,
+          }).catch(() => {});
+        }
+
+        await dismissAnyOpenOverlays(driver).catch(() => {});
+
+        reportStatus(
+          "HEADER",
+          `Waiting for Available Slot header (date ${dateScan.dateIso || dateScan.dateKey || "?"})`,
+        );
+        headerOk = await waitForAvailableSlotHeader(driver, 2500);
+        if (headerOk) break;
+
+        reportStatus(
+          "HEADER_MISSING_DATE",
+          `No Available Slot header for ${dateScan.dateIso || dateScan.dateKey || "(unknown)"}; trying next green date`,
+        );
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(80);
+      }
     }
 
     if (!headerOk) {
       reportStatus(
         "HEADER_MISSING",
-        "Available Slot header not visible for any in-range green date; resetting pickup",
+        "Available Slot header not visible yet; will retry (no pickup reset)",
       );
-      return "RESET_PICKUP";
+      return "NO_AVAILABLE_SLOT_HEADER";
     }
 
     reportStatus("SLOT", "Clicking first available time slot");
@@ -808,9 +1104,9 @@ async function fastBookingAttempt(driver) {
       if (slotStage1.foundAny) {
         reportStatus(
           "SLOT_SELECT_FAILED_STAGE1",
-          "Time slots were visible but none could be selected; resetting pickup",
+          "Time slots were visible but none could be selected; will retry (no pickup reset)",
         );
-        return "RESET_PICKUP";
+        return "SLOT_SELECT_FAILED_STAGE1";
       }
       reportStatus(
         "SLOT_MISSING_STAGE1",
@@ -831,9 +1127,9 @@ async function fastBookingAttempt(driver) {
     if (!proceedStage1.clicked) {
       reportStatus(
         "PROCEED_MISSING",
-        "Proceed button not clickable/visible; resetting pickup",
+        "Proceed button not clickable/visible; will retry (no pickup reset)",
       );
-      return "RESET_PICKUP";
+      return "PROCEED_MISSING";
     }
 
     // Some flows show the time-slot list only AFTER clicking proceed.
@@ -875,7 +1171,7 @@ async function fastBookingAttempt(driver) {
       await goToAppointmentPage(driver, { forceFromDashboard: true }).catch(
         () => {},
       );
-      return "RESET_PICKUP";
+      return "PROCEED_WHITE_SCREEN";
     }
 
     reportStatus("SLOT_STAGE2", "Scanning for time slot buttons after proceed");
@@ -935,7 +1231,7 @@ async function fastBookingAttempt(driver) {
           await goToAppointmentPage(driver, { forceFromDashboard: true }).catch(
             () => {},
           );
-          return "RESET_PICKUP";
+          return "PROCEED2_WHITE_SCREEN";
         }
       } else {
         reportStatus(
@@ -947,9 +1243,9 @@ async function fastBookingAttempt(driver) {
       if (slotStage2.foundAny) {
         reportStatus(
           "SLOT_STAGE2_SELECT_FAILED",
-          "Time slots were visible after proceed but none could be selected; resetting pickup",
+          "Time slots were visible after proceed but none could be selected; will retry (no pickup reset)",
         );
-        return "RESET_PICKUP";
+        return "SLOT_STAGE2_SELECT_FAILED";
       }
 
       reportStatus(
@@ -967,14 +1263,14 @@ async function fastBookingAttempt(driver) {
       await goToAppointmentPage(driver, { forceFromDashboard: true }).catch(
         () => {},
       );
-      return "RESET_PICKUP";
+      return "WHITE_SCREEN_GUARD";
     }
 
     reportStatus("SUCCESS", "Success");
     return "SUCCESS";
   } catch (err) {
     reportLog("error", String(err?.message || err));
-    return "RESET_PICKUP";
+    return "ERROR";
   }
 }
 
@@ -2478,20 +2774,91 @@ async function sleepWithKeepAlive(driver, totalMs) {
 }
 // Final confirmation of applicant checkbox before proceeding to time slot selection.
 async function confirmApplicant(driver) {
-  // Prefer the applicant-list checkbox (more precise than any checkbox on page).
-  const locator = By.xpath(
-    "//h3[contains(normalize-space(.),'Applicant List')]/ancestor::*[contains(@class,'group-data-holder')][1]//input[@type='checkbox']",
-  );
-  const checkbox = await driver.wait(until.elementLocated(locator), 3000);
+  // Applicant list checkbox (per user DOM): input#styled-checkbox-1, etc.
+  // Some UIs hide the <input> and expect clicking the styled <span>.
+  const locators = [
+    By.css("input[type='checkbox'][id^='styled-checkbox-']"),
+    By.css(".custom-checkbox input[type='checkbox']"),
+    By.xpath(
+      "//input[@type='checkbox' and starts-with(@id,'styled-checkbox-')]",
+    ),
+    By.xpath(
+      "//h3[contains(normalize-space(.),'Applicant List')]/following::input[@type='checkbox'][1]",
+    ),
+    By.xpath(
+      "//h3[contains(normalize-space(.),'Applicant List')]/ancestor::*[contains(@class,'group-data-holder')][1]//input[@type='checkbox']",
+    ),
+  ];
 
-  const selected = await checkbox.isSelected().catch(() => false);
-  if (!selected) {
-    await jsClick(driver, checkbox).catch(async () => {
-      await checkbox.click();
-    });
+  let checkbox = null;
+  for (const locator of locators) {
+    // eslint-disable-next-line no-await-in-loop
+    const els = await driver.findElements(locator).catch(() => []);
+    for (const el of els) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        if (await el.isDisplayed()) {
+          checkbox = el;
+          break;
+        }
+      } catch {
+        // ignore
+      }
+    }
+    if (checkbox) break;
   }
 
-  reportStatus("APPLICANT_SELECTED", "Applicant checkbox selected");
+  if (!checkbox) {
+    reportStatus("APPLICANT_CHECKBOX_MISSING", "Applicant checkbox not found");
+    reportLog("warn", "Applicant checkbox not found");
+    return false;
+  }
+
+  const selectedBefore = await checkbox.isSelected().catch(() => false);
+  if (selectedBefore) {
+    reportStatus("APPLICANT_SELECTED", "Applicant checkbox already selected");
+    return true;
+  }
+
+  // Try clicking the input (JS click works even if the input is visually hidden).
+  await jsClick(driver, checkbox).catch(async () => {
+    await safeClick(driver, checkbox);
+  });
+
+  let selected = await driver
+    .wait(async () => checkbox.isSelected().catch(() => false), 1500)
+    .catch(() => checkbox.isSelected().catch(() => false));
+
+  if (!selected) {
+    // Fallback: click the styled span next to the input.
+    const span = await checkbox
+      .findElement(
+        By.xpath("following-sibling::*[contains(@class,'checkbox')][1]"),
+      )
+      .catch(() => null);
+
+    if (span) {
+      await safeClick(driver, span)
+        .catch(() => jsClick(driver, span))
+        .catch(() => {});
+
+      selected = await driver
+        .wait(async () => checkbox.isSelected().catch(() => false), 1500)
+        .catch(() => checkbox.isSelected().catch(() => false));
+    }
+  }
+
+  if (selected) {
+    reportStatus("APPLICANT_SELECTED", "Applicant checkbox selected");
+    return true;
+  }
+
+  reportStatus(
+    "APPLICANT_NOT_SELECTED",
+    "Applicant checkbox click did not stick",
+  );
+  reportLog("warn", "Applicant checkbox click did not stick");
+  return false;
 }
 // Main appointment monitoring loop.
 async function appointmentWatcher(driver) {
@@ -2609,8 +2976,7 @@ async function appointmentWatcher(driver) {
         return;
       }
 
-      reportStatus("LOOP", `Reset pickup and retry (${result})`);
-      await resetPickup(driver).catch(() => {});
+      reportStatus("LOOP", `Retrying (${result})`);
       nextAttemptAtMs = Date.now() + intervalMs;
       continue;
     } catch (err) {
