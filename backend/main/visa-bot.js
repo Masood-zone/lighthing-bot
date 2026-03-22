@@ -390,6 +390,328 @@ async function selectPickupAccra(driver) {
   return true;
 }
 
+async function detectBookingConfirmed(driver) {
+  const url = await driver.getCurrentUrl().catch(() => "");
+  if (!url) return { confirmed: false, signal: "no_url" };
+  if (url.includes("/login")) return { confirmed: false, signal: "login" };
+
+  // If login inputs are present, treat as session-dead.
+  const loginInputs = await driver
+    .findElements(
+      By.css(
+        'input[formcontrolname="username"], input[formcontrolname="password"]',
+      ),
+    )
+    .catch(() => []);
+  if (loginInputs.length > 0) {
+    return { confirmed: false, signal: "session_dead" };
+  }
+
+  // Route-level signals.
+  if (url.includes("/dashboard")) {
+    return { confirmed: true, signal: "dashboard" };
+  }
+
+  if (url.includes("/home/appointment/myappointment")) {
+    return { confirmed: true, signal: "myappointment" };
+  }
+
+  // Text-level signals: only check dialogs/snackbars/alerts to avoid matching
+  // unrelated content on the appointment page.
+  const signal = await driver
+    .executeScript(() => {
+      const selectors = [
+        "mat-dialog-container",
+        "mat-mdc-dialog-container",
+        ".mat-snack-bar-container",
+        ".mat-mdc-snack-bar-container",
+        "snack-bar-container",
+        "[role='alert']",
+        ".toast",
+        ".toast-container",
+      ];
+
+      const nodes = selectors.flatMap((sel) =>
+        Array.from(document.querySelectorAll(sel)),
+      );
+
+      const combined = nodes
+        .map((n) => (n?.innerText || n?.textContent || "").trim())
+        .filter(Boolean)
+        .join("\n")
+        .toLowerCase();
+
+      const hasBooked =
+        combined.includes("appointment booked") ||
+        combined.includes("appointment confirmed") ||
+        combined.includes("successfully booked") ||
+        combined.includes("appointment successfully") ||
+        (combined.includes("success") && combined.includes("appointment"));
+
+      return { hasBooked };
+    })
+    .catch(() => ({ hasBooked: false }));
+
+  if (signal.hasBooked) return { confirmed: true, signal: "success_toast" };
+
+  return { confirmed: false, signal: "none" };
+}
+
+function scoreConfirmActionText(txt) {
+  const t = String(txt || "")
+    .trim()
+    .toUpperCase();
+  if (!t) return null;
+
+  const negative = ["CANCEL", "BACK", "NO", "CLOSE"];
+  if (negative.some((w) => t.includes(w))) return null;
+
+  const positive = ["CONFIRM", "BOOK", "SUBMIT", "YES", "OK"];
+  const idx = positive.findIndex((w) => t.includes(w) || t === w);
+  if (idx === -1) return null;
+  return idx;
+}
+
+async function clickPrimaryConfirmInContainer(driver, containerEl) {
+  const containerText = ((await containerEl.getText().catch(() => "")) || "")
+    .trim()
+    .toUpperCase();
+
+  const looksLikeCancelDialog =
+    containerText.includes("CANCEL APPOINTMENT") ||
+    (containerText.includes("CANCEL") && containerText.includes("APPOINTMENT"));
+
+  const genericOkAllowed =
+    containerText.includes("BOOK") ||
+    containerText.includes("RESCHEDULE") ||
+    containerText.includes("APPOINTMENT BOOKED") ||
+    containerText.includes("APPOINTMENT CONFIRMED") ||
+    (containerText.includes("SUCCESS") &&
+      containerText.includes("APPOINTMENT"));
+
+  const buttons = await containerEl.findElements(By.css("button, a"));
+  let best = null;
+
+  for (const el of buttons) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      if (!(await el.isDisplayed())) continue;
+
+      // eslint-disable-next-line no-await-in-loop
+      const disabledAttr = await el.getAttribute("disabled");
+      // eslint-disable-next-line no-await-in-loop
+      const ariaDisabled = await el.getAttribute("aria-disabled");
+      if (disabledAttr || ariaDisabled === "true") continue;
+
+      // eslint-disable-next-line no-await-in-loop
+      const rawText = ((await el.getText().catch(() => "")) || "").trim();
+      // eslint-disable-next-line no-await-in-loop
+      const ariaLabel = (
+        (await el.getAttribute("aria-label").catch(() => "")) || ""
+      ).trim();
+      const txt = rawText || ariaLabel;
+      const score = scoreConfirmActionText(txt);
+      if (score === null) continue;
+
+      // Safety: never confirm cancellation dialogs.
+      if (looksLikeCancelDialog) continue;
+
+      // Safety: only allow generic YES/OK when context is clearly booking-related.
+      if (score >= 3 && !genericOkAllowed) continue;
+
+      // eslint-disable-next-line no-await-in-loop
+      const focusInitial = await el
+        .getAttribute("cdkfocusinitial")
+        .catch(() => null);
+
+      const cand = {
+        el,
+        score,
+        text: txt,
+        focusInitial: focusInitial !== null,
+      };
+
+      if (!best) {
+        best = cand;
+        continue;
+      }
+
+      if (cand.focusInitial && !best.focusInitial) {
+        best = cand;
+        continue;
+      }
+      if (cand.score < best.score) {
+        best = cand;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!best) return { clicked: false };
+
+  await driver
+    .executeScript(
+      "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+      best.el,
+    )
+    .catch(() => {});
+  await sleep(120);
+  await safeClick(driver, best.el).catch(() => jsClick(driver, best.el));
+  return { clicked: true, text: best.text || null };
+}
+
+async function clickSnackbarActionIfPresent(driver) {
+  const snackbars = await driver
+    .findElements(
+      By.css(
+        ".mat-snack-bar-container, .mat-mdc-snack-bar-container, snack-bar-container",
+      ),
+    )
+    .catch(() => []);
+
+  for (const sb of snackbars) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      if (!(await sb.isDisplayed())) continue;
+
+      // Snackbars are non-destructive; allow dismiss/ok/close.
+      // eslint-disable-next-line no-await-in-loop
+      const buttons = await sb.findElements(By.css("button"));
+      for (const b of buttons) {
+        // eslint-disable-next-line no-await-in-loop
+        if (!(await b.isDisplayed().catch(() => false))) continue;
+        // eslint-disable-next-line no-await-in-loop
+        const disabledAttr = await b.getAttribute("disabled");
+        // eslint-disable-next-line no-await-in-loop
+        const ariaDisabled = await b.getAttribute("aria-disabled");
+        if (disabledAttr || ariaDisabled === "true") continue;
+
+        // eslint-disable-next-line no-await-in-loop
+        const txt = ((await b.getText().catch(() => "")) || "").trim();
+        // eslint-disable-next-line no-await-in-loop
+        await safeClick(driver, b).catch(() => jsClick(driver, b));
+        return { clicked: true, kind: "snackbar", text: txt || null };
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return { clicked: false, kind: null, text: null };
+}
+
+async function clickFinalConfirmationIfPresent(driver) {
+  // Prefer modal/dialog primary actions.
+  const dialogs = await driver
+    .findElements(
+      By.css("mat-dialog-container, mat-mdc-dialog-container, [role='dialog']"),
+    )
+    .catch(() => []);
+
+  for (const dialog of dialogs) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      if (!(await dialog.isDisplayed())) continue;
+      // eslint-disable-next-line no-await-in-loop
+      const res = await clickPrimaryConfirmInContainer(driver, dialog);
+      if (res.clicked) return { clicked: true, kind: "dialog", text: res.text };
+    } catch {
+      // ignore
+    }
+  }
+
+  // If a snackbar is visible, dismiss it (may unblock UI).
+  const snack = await clickSnackbarActionIfPresent(driver);
+  if (snack.clicked) return snack;
+
+  // Page-level confirm/book buttons.
+  // Keep this strict to avoid clicking unrelated controls.
+  const candidates = await driver
+    .findElements(
+      By.xpath(
+        "//button[not(@disabled) and (contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'CONFIRM') or contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'BOOK') or contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'SUBMIT')) and not(contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'CANCEL')) and not(contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'BACK')) and not(contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'CLOSE')) and not(contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'NO'))]",
+      ),
+    )
+    .catch(() => []);
+
+  // Pick the best candidate by text scoring.
+  let best = null;
+  for (const el of candidates) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      if (!(await el.isDisplayed())) continue;
+      // eslint-disable-next-line no-await-in-loop
+      const txt = ((await el.getText().catch(() => "")) || "").trim();
+      const score = scoreConfirmActionText(txt);
+      if (score === null) continue;
+
+      if (!best || score < best.score) {
+        best = { el, score, text: txt };
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (best) {
+    await driver
+      .executeScript(
+        "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+        best.el,
+      )
+      .catch(() => {});
+    await sleep(120);
+    await safeClick(driver, best.el).catch(() => jsClick(driver, best.el));
+    return { clicked: true, kind: "page", text: best.text || null };
+  }
+
+  return { clicked: false, kind: null, text: null };
+}
+
+async function finalizeBookingAndConfirm(driver, { timeoutMs = 25_000 } = {}) {
+  const start = Date.now();
+  let clickedSomething = false;
+
+  while (Date.now() - start < timeoutMs) {
+    // eslint-disable-next-line no-await-in-loop
+    const sig = await detectBookingConfirmed(driver).catch(() => ({
+      confirmed: false,
+      signal: "detect_failed",
+    }));
+    if (sig.confirmed) return { confirmed: true, signal: sig.signal };
+
+    // eslint-disable-next-line no-await-in-loop
+    const click = await clickFinalConfirmationIfPresent(driver);
+    if (click.clicked) {
+      clickedSomething = true;
+      reportStatus(
+        "FINAL_CONFIRM_CLICK",
+        `Clicked final confirmation (${click.kind}): ${click.text || "(unknown)"}`,
+      );
+      // eslint-disable-next-line no-await-in-loop
+      await waitForLoadingOverlayToClear(driver, 30_000).catch(() => true);
+      // eslint-disable-next-line no-await-in-loop
+      await dismissAnyOpenOverlays(driver).catch(() => {});
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(300);
+      continue;
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(650);
+  }
+
+  const sig = await detectBookingConfirmed(driver).catch(() => ({
+    confirmed: false,
+    signal: "detect_failed",
+  }));
+  return {
+    confirmed: Boolean(sig.confirmed),
+    signal: sig.signal || (clickedSomething ? "pending" : "timeout"),
+  };
+}
+
 async function findGreenAvailableDate(driver) {
   // Only select calendar cells that are *visually* green (#14a38b).
   // This is the sole signal of availability.
@@ -1266,7 +1588,20 @@ async function fastBookingAttempt(driver) {
       return "WHITE_SCREEN_GUARD";
     }
 
-    reportStatus("SUCCESS", "Success");
+    // Finalize: only report SUCCESS after a real confirm/success signal.
+    reportStatus("FINALIZE", "Finalizing booking (confirm + success check)");
+    const final = await finalizeBookingAndConfirm(driver, {
+      timeoutMs: 25_000,
+    });
+    if (!final.confirmed) {
+      reportStatus(
+        "FINALIZE_PENDING",
+        `Booking not confirmed yet (${final.signal}); will retry (no pickup reselect)`,
+      );
+      return "FINAL_NOT_CONFIRMED";
+    }
+
+    reportStatus("SUCCESS", `Booking confirmed (${final.signal})`);
     return "SUCCESS";
   } catch (err) {
     reportLog("error", String(err?.message || err));
@@ -2714,18 +3049,17 @@ async function togglePickupToRefreshAvailability(
 }
 
 async function triggerPickupCheck(driver) {
-  // Ensure each attempt actually triggers the site's availability check.
-  // If the UI already shows Accra selected, a plain `selectPickupPoint()` will no-op,
-  // which looks like the bot is hanging.
+  // Requirement: select pickup once and keep it stable.
+  // Only (re)select if it's not already set to the configured pickup point.
   const current = await getCurrentPickupValueText(driver).catch(() => "");
   if (
     current &&
     !current.includes("Select") &&
     current.includes(String(CONFIG.PICKUP_POINT))
   ) {
-    await forceReselectPickupPoint(driver, CONFIG.PICKUP_POINT);
     return;
   }
+
   await selectPickupPoint(driver);
 }
 
@@ -2971,8 +3305,8 @@ async function appointmentWatcher(driver) {
 
       const result = await fastBookingAttempt(driver);
       if (result === "SUCCESS") {
-        console.log("Appointment booking flow progressed.");
-        reportStatus("COMPLETED", "Appointment booking flow progressed");
+        console.log("Booking confirmed.");
+        reportStatus("COMPLETED", "Booking confirmed");
         return;
       }
 
