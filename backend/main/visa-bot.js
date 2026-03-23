@@ -3048,15 +3048,127 @@ async function togglePickupToRefreshAvailability(
   return { toggled: true, reason: "ok" };
 }
 
+async function refreshPickupAvailabilityViaSelectThenTarget(
+  driver,
+  pickupName,
+  { force = false } = {},
+) {
+  const now = Date.now();
+  if (!force && now - lastPickupToggleAtMs < CONFIG.PICKUP_TOGGLE.COOLDOWN_MS) {
+    return { refreshed: false, reason: "cooldown" };
+  }
+
+  reportStatus(
+    "PICKUP_REFRESH",
+    `Refreshing pickup: Select -> ${String(pickupName)}`,
+  );
+
+  try {
+    const select = await driver.wait(
+      until.elementLocated(
+        By.css(
+          ".ofc-book-slot-block mat-select[panelclass*='drop-down-panelcls'], .ofc-book-slot-block mat-select",
+        ),
+      ),
+      12000,
+    );
+
+    await driver.executeScript(
+      "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+      select,
+    );
+
+    // 1) Open and pick the placeholder "Select" option.
+    await safeClick(driver, select);
+    await driver.wait(until.elementLocated(By.css(".cdk-overlay-pane")), 12000);
+
+    const selectOption = await driver
+      .wait(
+        until.elementLocated(
+          By.xpath(
+            "//div[contains(@class,'cdk-overlay-pane')]//mat-option//span[contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'SELECT') and not(contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'ACCRA'))]",
+          ),
+        ),
+        6000,
+      )
+      .catch(() => null);
+
+    if (selectOption) {
+      await driver
+        .wait(until.elementIsVisible(selectOption), 8000)
+        .catch(() => {});
+      await safeClick(driver, selectOption).catch(() =>
+        jsClick(driver, selectOption),
+      );
+      await dismissAnyOpenOverlays(driver).catch(() => {});
+      await waitForLoadingOverlayToClear(driver, 10_000).catch(() => true);
+    } else {
+      // If the placeholder option isn't present, fall back to a forced reselect.
+      await dismissAnyOpenOverlays(driver).catch(() => {});
+    }
+
+    // 2) Open again and pick the target pickup.
+    await safeClick(driver, select);
+    await driver.wait(until.elementLocated(By.css(".cdk-overlay-pane")), 12000);
+
+    const targetOption = await driver
+      .wait(
+        until.elementLocated(
+          By.xpath(
+            `//div[contains(@class,'cdk-overlay-pane')]//mat-option//span[contains(normalize-space(.), ${JSON.stringify(
+              String(pickupName),
+            )})]`,
+          ),
+        ),
+        8000,
+      )
+      .catch(() => null);
+
+    if (!targetOption) {
+      throw new Error(
+        `Pickup option '${String(pickupName)}' not found during refresh`,
+      );
+    }
+
+    await driver
+      .wait(until.elementIsVisible(targetOption), 8000)
+      .catch(() => {});
+    await safeClick(driver, targetOption).catch(() =>
+      jsClick(driver, targetOption),
+    );
+    await dismissAnyOpenOverlays(driver).catch(() => {});
+    await waitForLoadingOverlayToClear(driver, 10_000).catch(() => true);
+
+    lastPickupToggleAtMs = Date.now();
+    reportStatus("PICKUP_REFRESHED", `Pickup refreshed: ${String(pickupName)}`);
+    return { refreshed: true, reason: "ok" };
+  } catch (err) {
+    reportLog(
+      "warn",
+      `Pickup refresh failed; falling back to force reselect: ${String(
+        err?.message || err,
+      )}`,
+    );
+    await forceReselectPickupPoint(driver, pickupName).catch(() => {});
+    lastPickupToggleAtMs = Date.now();
+    return { refreshed: true, reason: "fallback_force_reselect" };
+  }
+}
+
 async function triggerPickupCheck(driver) {
-  // Requirement: select pickup once and keep it stable.
-  // Only (re)select if it's not already set to the configured pickup point.
+  // Requirement update: refresh availability by re-selecting pickup.
+  // If it's already set to the configured pickup point, explicitly
+  // select the placeholder "Select" option and then pick the pickup again.
   const current = await getCurrentPickupValueText(driver).catch(() => "");
   if (
     current &&
     !current.includes("Select") &&
     current.includes(String(CONFIG.PICKUP_POINT))
   ) {
+    await refreshPickupAvailabilityViaSelectThenTarget(
+      driver,
+      CONFIG.PICKUP_POINT,
+    ).catch(() => {});
     return;
   }
 
@@ -3113,6 +3225,7 @@ async function confirmApplicant(driver) {
   const locators = [
     By.css("input[type='checkbox'][id^='styled-checkbox-']"),
     By.css(".custom-checkbox input[type='checkbox']"),
+    By.css(".custom-checkbox span.checkbox"),
     By.xpath(
       "//input[@type='checkbox' and starts-with(@id,'styled-checkbox-')]",
     ),
@@ -3120,9 +3233,51 @@ async function confirmApplicant(driver) {
       "//h3[contains(normalize-space(.),'Applicant List')]/following::input[@type='checkbox'][1]",
     ),
     By.xpath(
+      "//h3[contains(normalize-space(.),'Applicant List')]/following::span[contains(@class,'checkbox')][1]",
+    ),
+    By.xpath(
       "//h3[contains(normalize-space(.),'Applicant List')]/ancestor::*[contains(@class,'group-data-holder')][1]//input[@type='checkbox']",
     ),
   ];
+
+  async function isApplicantChecked() {
+    return driver
+      .executeScript(() => {
+        const norm = (s) =>
+          String(s || "")
+            .trim()
+            .toLowerCase();
+
+        const headers = Array.from(
+          document.querySelectorAll("h1,h2,h3,h4,h5,h6"),
+        );
+        const hdr = headers.find((h) =>
+          norm(h.textContent).includes("applicant list"),
+        );
+        const scope = hdr ? hdr.closest("section,div") || document : document;
+
+        const checkedInput = scope.querySelector(
+          "input[type='checkbox']:checked",
+        );
+        if (checkedInput) return true;
+
+        const ariaChecked = scope.querySelector("[aria-checked='true']");
+        if (ariaChecked) return true;
+
+        const checkedClass = scope.querySelector(
+          ".checked, .is-checked, .mat-checkbox-checked, .mat-mdc-checkbox-checked",
+        );
+        if (checkedClass) return true;
+
+        // Last resort: some custom checkboxes toggle a class on the span itself.
+        const spanChecked = scope.querySelector(
+          "span.checkbox.checked, span.checkbox.is-checked",
+        );
+        return Boolean(spanChecked);
+      })
+      .then(Boolean)
+      .catch(() => false);
+  }
 
   let checkbox = null;
   for (const locator of locators) {
@@ -3130,8 +3285,17 @@ async function confirmApplicant(driver) {
     const els = await driver.findElements(locator).catch(() => []);
     for (const el of els) {
       try {
+        // Accept hidden <input> elements (JS click still works).
+        // For non-input elements, require visible.
         // eslint-disable-next-line no-await-in-loop
-        if (await el.isDisplayed()) {
+        const tag = await el.getTagName().catch(() => "");
+        if (String(tag).toLowerCase() === "input") {
+          checkbox = el;
+          break;
+        }
+
+        // eslint-disable-next-line no-await-in-loop
+        if (await el.isDisplayed().catch(() => false)) {
           checkbox = el;
           break;
         }
@@ -3148,37 +3312,93 @@ async function confirmApplicant(driver) {
     return false;
   }
 
-  const selectedBefore = await checkbox.isSelected().catch(() => false);
-  if (selectedBefore) {
-    reportStatus("APPLICANT_SELECTED", "Applicant checkbox already selected");
-    return true;
+  const tag = await checkbox.getTagName().catch(() => "");
+  const isInput = String(tag).toLowerCase() === "input";
+
+  if (isInput) {
+    const selectedBefore =
+      (await checkbox.isSelected().catch(() => false)) ||
+      (await isApplicantChecked());
+    if (selectedBefore) {
+      reportStatus("APPLICANT_SELECTED", "Applicant checkbox already selected");
+      return true;
+    }
+  } else {
+    const selectedBefore = await isApplicantChecked();
+    if (selectedBefore) {
+      reportStatus("APPLICANT_SELECTED", "Applicant checkbox already selected");
+      return true;
+    }
   }
 
-  // Try clicking the input (JS click works even if the input is visually hidden).
+  // Click the primary candidate.
+  await driver
+    .executeScript(
+      "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+      checkbox,
+    )
+    .catch(() => {});
+
   await jsClick(driver, checkbox).catch(async () => {
     await safeClick(driver, checkbox);
   });
 
-  let selected = await driver
-    .wait(async () => checkbox.isSelected().catch(() => false), 1500)
-    .catch(() => checkbox.isSelected().catch(() => false));
+  let selected = false;
+  if (isInput) {
+    selected = await driver
+      .wait(async () => {
+        const v = await checkbox.isSelected().catch(() => false);
+        if (v) return true;
+        return isApplicantChecked();
+      }, 2000)
+      .catch(async () => {
+        const v = await checkbox.isSelected().catch(() => false);
+        return v || isApplicantChecked();
+      });
+  } else {
+    selected = await driver
+      .wait(async () => isApplicantChecked(), 2000)
+      .catch(() => isApplicantChecked());
+  }
 
   if (!selected) {
-    // Fallback: click the styled span next to the input.
+    // Fallback: click a nearby styled span.
     const span = await checkbox
       .findElement(
         By.xpath("following-sibling::*[contains(@class,'checkbox')][1]"),
       )
-      .catch(() => null);
+      .catch(async () => {
+        // Try ancestor label/container.
+        const parentSpan = await driver
+          .executeScript(
+            "const el = arguments[0]; const root = el.closest('label,.custom-checkbox,td,tr,div') || el.parentElement; if (!root) return null; return root.querySelector('span.checkbox');",
+            checkbox,
+          )
+          .catch(() => null);
+        return parentSpan || null;
+      });
 
     if (span) {
       await safeClick(driver, span)
         .catch(() => jsClick(driver, span))
         .catch(() => {});
 
-      selected = await driver
-        .wait(async () => checkbox.isSelected().catch(() => false), 1500)
-        .catch(() => checkbox.isSelected().catch(() => false));
+      if (isInput) {
+        selected = await driver
+          .wait(async () => {
+            const v = await checkbox.isSelected().catch(() => false);
+            if (v) return true;
+            return isApplicantChecked();
+          }, 2000)
+          .catch(async () => {
+            const v = await checkbox.isSelected().catch(() => false);
+            return v || isApplicantChecked();
+          });
+      } else {
+        selected = await driver
+          .wait(async () => isApplicantChecked(), 2000)
+          .catch(() => isApplicantChecked());
+      }
     }
   }
 
