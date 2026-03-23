@@ -34,9 +34,11 @@ const CONFIG = {
     ),
     // How long to wait after selecting pickup for the calendar UI to update.
     // We do NOT use the "no appointments" toast anymore.
+    // This value is also used to cap how long we wait for the loading overlay
+    // after pickup refresh/reselect (keeps refresh fast).
     TOAST_WAIT_MS: Math.max(
       500,
-      Number(process.env.VISA_TOAST_WAIT_MS) || 5500,
+      Number(process.env.VISA_TOAST_WAIT_MS) || 2500,
     ),
     WINDOW_MS: Math.max(
       60_000,
@@ -1229,6 +1231,21 @@ async function waitForLoadingOverlay(
   return true;
 }
 
+async function waitForPickupUiUpdate(driver) {
+  // Goal: be fast. We only wait briefly for the overlay to appear, then cap
+  // the clear wait to the configured pickup update window.
+  const maxWaitMs = Math.max(
+    500,
+    Number(CONFIG.ATTEMPTS.TOAST_WAIT_MS) || 2500,
+  );
+  const appearMs = Math.min(900, maxWaitMs);
+  await waitForLoadingOverlay(driver, {
+    appearMs,
+    disappearMs: maxWaitMs,
+  }).catch(() => true);
+  await sleep(120);
+}
+
 async function checkApplicantCheckbox(driver) {
   return confirmApplicant(driver);
 }
@@ -1627,7 +1644,7 @@ async function waitForLoadingOverlayToClear(driver, timeoutMs = 15_000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (!(await isLoadingOverlayVisible(driver))) return true;
-    await sleep(500);
+    await sleep(200);
   }
   return false;
 }
@@ -2830,7 +2847,7 @@ async function selectPickupPoint(driver) {
         // eslint-disable-next-line no-await-in-loop
         await dismissAnyOpenOverlays(driver).catch(() => {});
         // eslint-disable-next-line no-await-in-loop
-        await sleep(1200);
+        await sleep(300);
         continue;
       }
 
@@ -2857,7 +2874,7 @@ async function selectPickupPoint(driver) {
       // eslint-disable-next-line no-await-in-loop
       await dismissAnyOpenOverlays(driver).catch(() => {});
       // eslint-disable-next-line no-await-in-loop
-      await sleep(1200);
+      await sleep(300);
     }
   }
 
@@ -2956,7 +2973,7 @@ async function forceReselectPickupPoint(driver, pickupName) {
 
   // Close dropdown reliably.
   await dismissAnyOpenOverlays(driver).catch(() => {});
-  await waitForLoadingOverlayToClear(driver, 10_000).catch(() => {});
+  await waitForPickupUiUpdate(driver).catch(() => {});
 
   lastPickupToggleAtMs = Date.now();
   return true;
@@ -3039,9 +3056,9 @@ async function togglePickupToRefreshAvailability(
   );
 
   await selectPickupPointByName(driver, alt).catch(() => null);
-  await waitForLoadingOverlayToClear(driver, 10_000).catch(() => {});
+  await waitForPickupUiUpdate(driver).catch(() => {});
   await selectPickupPointByName(driver, CONFIG.PICKUP_POINT).catch(() => null);
-  await waitForLoadingOverlayToClear(driver, 10_000).catch(() => {});
+  await waitForPickupUiUpdate(driver).catch(() => {});
 
   lastAlternatePickupPoint = alt;
   lastPickupToggleAtMs = Date.now();
@@ -3101,7 +3118,7 @@ async function refreshPickupAvailabilityViaSelectThenTarget(
         jsClick(driver, selectOption),
       );
       await dismissAnyOpenOverlays(driver).catch(() => {});
-      await waitForLoadingOverlayToClear(driver, 10_000).catch(() => true);
+      await waitForPickupUiUpdate(driver).catch(() => true);
     } else {
       // If the placeholder option isn't present, fall back to a forced reselect.
       await dismissAnyOpenOverlays(driver).catch(() => {});
@@ -3137,7 +3154,7 @@ async function refreshPickupAvailabilityViaSelectThenTarget(
       jsClick(driver, targetOption),
     );
     await dismissAnyOpenOverlays(driver).catch(() => {});
-    await waitForLoadingOverlayToClear(driver, 10_000).catch(() => true);
+    await waitForPickupUiUpdate(driver).catch(() => true);
 
     lastPickupToggleAtMs = Date.now();
     reportStatus("PICKUP_REFRESHED", `Pickup refreshed: ${String(pickupName)}`);
@@ -3190,7 +3207,7 @@ async function goToNextCalendarMonth(driver) {
   if (await isCalendarNavEnabled(driver, nextSelector)) {
     const nextBtn = await driver.findElement(By.css(nextSelector));
     await nextBtn.click();
-    await sleep(1200);
+    await sleep(350);
     return true;
   }
 
