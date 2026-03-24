@@ -1744,7 +1744,9 @@ async function fastBookingAttempt(driver) {
 
     reportStatus(
       "PROCEED",
-      CONFIG.RESCHEDULE ? "Clicking SELECT" : "Clicking SELECT POST AND PROCEED",
+      CONFIG.RESCHEDULE
+        ? "Clicking SELECT"
+        : "Clicking SELECT POST AND PROCEED",
     );
     const beforeProceedUrl = await driver.getCurrentUrl().catch(() => "");
     const beforeProceedHandles = await driver
@@ -2658,8 +2660,12 @@ async function clickEarliestTimeSlotOnly(driver, timeoutMs = 6000) {
     if (green.length > 0 || anyTime.length > 0) foundAny = true;
 
     const sortByMinutes = (a, b) => {
-      const am = Number.isFinite(a.minutes) ? a.minutes : Number.POSITIVE_INFINITY;
-      const bm = Number.isFinite(b.minutes) ? b.minutes : Number.POSITIVE_INFINITY;
+      const am = Number.isFinite(a.minutes)
+        ? a.minutes
+        : Number.POSITIVE_INFINITY;
+      const bm = Number.isFinite(b.minutes)
+        ? b.minutes
+        : Number.POSITIVE_INFINITY;
       if (am !== bm) return am - bm;
       return String(a.txt).localeCompare(String(b.txt));
     };
@@ -2667,7 +2673,8 @@ async function clickEarliestTimeSlotOnly(driver, timeoutMs = 6000) {
     green.sort(sortByMinutes);
     anyTime.sort(sortByMinutes);
 
-    const pick = green.length > 0 ? green[0] : anyTime.length > 0 ? anyTime[0] : null;
+    const pick =
+      green.length > 0 ? green[0] : anyTime.length > 0 ? anyTime[0] : null;
     if (!pick) {
       // eslint-disable-next-line no-await-in-loop
       await sleep(250);
@@ -2754,11 +2761,12 @@ async function proceedIfAvailableSlotsVisible(driver) {
         .wait(until.elementLocated(By.xpath(xpathBookPost)), 2500)
         .catch(() => null);
 
-  const selectOnlyBtn = selectProceedBtn || bookPostBtn
-    ? null
-    : await driver
-        .wait(until.elementLocated(By.xpath(xpathSelectOnlyNearSlots)), 1500)
-        .catch(() => null);
+  const selectOnlyBtn =
+    selectProceedBtn || bookPostBtn
+      ? null
+      : await driver
+          .wait(until.elementLocated(By.xpath(xpathSelectOnlyNearSlots)), 1500)
+          .catch(() => null);
 
   const proceedBtn = selectProceedBtn || bookPostBtn || selectOnlyBtn;
 
