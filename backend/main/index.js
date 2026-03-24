@@ -24,6 +24,10 @@ const CONFIG = {
     200,
     Number(process.env.VISA_ATTEMPT_INTERVAL_MS) || 300,
   ),
+  BURST_INTERVAL_MS: Math.max(
+    200,
+    Number(process.env.VISA_ATTEMPT_BURST_INTERVAL_MS) || 250,
+  ),
   MAX_MONTHS: Math.max(1, Number(process.env.VISA_CALENDAR_MAX_MONTHS) || 6),
   PROFILE_DIR: process.env.VISA_PROFILE_DIR || "",
 };
@@ -35,6 +39,11 @@ function status(state, message) {
 }
 
 async function launchBrowser() {
+  status(
+    "BROWSER",
+    `${CONFIG.HEADLESS ? "Headless" : "Headed"} Chrome${CONFIG.PROFILE_DIR ? " with persistent profile" : ""}`,
+  );
+
   const launchOptions = {
     headless: CONFIG.HEADLESS,
     channel: "chrome",
@@ -374,7 +383,9 @@ async function main() {
         status("SUCCESS", "Fast attempt completed; continuing monitor loop");
       }
 
-      await sleep(result === "idle" ? CONFIG.INTERVAL_MS : 75);
+      await sleep(
+        result === "idle" ? CONFIG.INTERVAL_MS : CONFIG.BURST_INTERVAL_MS,
+      );
     }
   } finally {
     if (context) await context.close().catch(() => {});

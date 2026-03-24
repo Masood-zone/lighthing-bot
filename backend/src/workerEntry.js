@@ -1,4 +1,4 @@
-// Entry point for forked Selenium workers.
-// This isolates Selenium/Chrome from the API server process.
+// Entry point for forked worker sessions.
+// This isolates the booking browser automation from the API server process.
 
-require("../main/visa-bot");
+require("../main/index");
