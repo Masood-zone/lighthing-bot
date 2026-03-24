@@ -1298,6 +1298,172 @@ async function resetPickup(driver) {
   return true;
 }
 
+async function ensureCalendarAtOrAfterAllowedMinMonth(driver) {
+  const allowed = getAllowedDateRange();
+  if (!allowed.min) return true;
+
+  const current = await getCalendarHeaderText(driver)
+    .then(parseMonthYear)
+    .catch(() => null);
+  if (!current) return true;
+
+  const want = {
+    year: allowed.min.getUTCFullYear(),
+    monthIndex: allowed.min.getUTCMonth(),
+  };
+
+  if (monthKey(current) >= monthKey(want)) return true;
+
+  reportStatus(
+    "CALENDAR_JUMP",
+    `Jumping calendar to allowed min month: ${want.year}-${String(want.monthIndex + 1).padStart(2, "0")}`,
+  );
+  await setCalendarToMonth(driver, want).catch(() => false);
+  return true;
+}
+
+async function goToNextCalendarMonthAndWait(driver, beforeHeader) {
+  const beforeKey = beforeHeader ? monthKey(beforeHeader) : null;
+  const moved = await goToNextCalendarMonth(driver).catch(() => false);
+  if (!moved) return { moved: false, header: beforeHeader || null };
+
+  const start = Date.now();
+  while (Date.now() - start < 5000) {
+    // eslint-disable-next-line no-await-in-loop
+    const hdr = await getCalendarHeaderText(driver)
+      .then(parseMonthYear)
+      .catch(() => null);
+    if (hdr && (beforeKey == null || monthKey(hdr) !== beforeKey)) {
+      return { moved: true, header: hdr };
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(120);
+  }
+
+  const hdr = await getCalendarHeaderText(driver)
+    .then(parseMonthYear)
+    .catch(() => null);
+  return { moved: true, header: hdr || beforeHeader || null };
+}
+
+async function pulseApplicantCheckbox(driver) {
+  reportStatus(
+    "APPLICANT_PULSE",
+    "Pulsing applicant checkbox (uncheck/recheck) to lock state",
+  );
+
+  const res = await driver
+    .executeAsyncScript((done) => {
+      try {
+        const norm = (s) =>
+          String(s || "")
+            .trim()
+            .toLowerCase();
+
+        const headers = Array.from(
+          document.querySelectorAll("h1,h2,h3,h4,h5,h6"),
+        );
+        const hdr = headers.find((h) =>
+          norm(h.textContent).includes("applicant list"),
+        );
+        const scope = hdr ? hdr.closest("section,div") || document : document;
+
+        const isChecked = () => {
+          const checkedInput = scope.querySelector(
+            "input[type='checkbox']:checked",
+          );
+          if (checkedInput) return true;
+
+          const ariaChecked = scope.querySelector("[aria-checked='true']");
+          if (ariaChecked) return true;
+
+          const checkedClass = scope.querySelector(
+            ".checked, .is-checked, .mat-checkbox-checked, .mat-mdc-checkbox-checked",
+          );
+          if (checkedClass) return true;
+
+          const spanChecked = scope.querySelector(
+            "span.checkbox.checked, span.checkbox.is-checked",
+          );
+          return Boolean(spanChecked);
+        };
+
+        const findTarget = () => {
+          const input =
+            scope.querySelector(
+              "input[type='checkbox'][id^='styled-checkbox-']",
+            ) ||
+            scope.querySelector(".custom-checkbox input[type='checkbox']") ||
+            scope.querySelector("input[type='checkbox']");
+          if (input) return input;
+
+          const span =
+            scope.querySelector(".custom-checkbox span.checkbox") ||
+            scope.querySelector("span.checkbox");
+          if (span) return span;
+
+          return scope.querySelector("[role='checkbox']");
+        };
+
+        const click = (el) => {
+          if (!el) return false;
+          try {
+            const disabled = el.getAttribute("disabled");
+            const ariaDisabled = el.getAttribute("aria-disabled");
+            if (disabled != null || ariaDisabled === "true") return false;
+          } catch {
+            // ignore
+          }
+
+          try {
+            el.scrollIntoView({ block: "center", inline: "nearest" });
+          } catch {
+            // ignore
+          }
+
+          try {
+            el.click();
+            return true;
+          } catch {
+            return false;
+          }
+        };
+
+        const target = findTarget();
+        if (!target) {
+          done({ ok: false, reason: "no_checkbox" });
+          return;
+        }
+
+        const before = isChecked();
+
+        // Toggle twice to force the app to re-evaluate the applicant selection.
+        click(target);
+        setTimeout(() => {
+          click(target);
+          setTimeout(() => {
+            if (!isChecked()) {
+              click(target);
+            }
+            setTimeout(() => {
+              done({ ok: isChecked(), before, after: isChecked() });
+            }, 140);
+          }, 180);
+        }, 180);
+      } catch {
+        done({ ok: false, reason: "exception" });
+      }
+    })
+    .catch(() => null);
+
+  const ok = Boolean(res?.ok);
+  reportStatus(
+    "APPLICANT_PULSE_DONE",
+    ok ? "Applicant pulse complete" : "Applicant pulse skipped/failed",
+  );
+  return ok;
+}
+
 // Core algorithm (strict):
 // (PENDING) APPLICANT -> SELECT_PICKUP -> DATE -> SLOT -> PROCEED -> SUCCESS
 // (RESCHEDULE) SELECT_PICKUP -> DATE -> SLOT -> PROCEED -> SUCCESS
@@ -1359,6 +1525,20 @@ async function fastBookingAttempt(driver) {
 
     // If we already have a selected date, wait briefly for slots to appear.
     if (!headerOk && alreadySelectedDate) {
+      // Pending-mode fix: sometimes the UI forgets the applicant selection even
+      // when the checkbox looks checked. Pulsing the applicant checkbox forces
+      // the form to re-evaluate.
+      if (!CONFIG.RESCHEDULE) {
+        reportStatus(
+          "APPLICANT",
+          "Re-confirming applicant (date already selected)",
+        );
+        await confirmApplicant(driver).catch(() => false);
+        await pulseApplicantCheckbox(driver).catch(() => false);
+        await waitForLoadingOverlayToClear(driver, 2500).catch(() => true);
+        await confirmApplicant(driver).catch(() => false);
+      }
+
       reportStatus(
         "HEADER",
         "Date already selected; waiting for Available Slot header",
@@ -1368,56 +1548,156 @@ async function fastBookingAttempt(driver) {
 
     // Otherwise scan for in-range green dates and click one.
     if (!headerOk) {
-      for (let i = 0; i < 8; i += 1) {
-        const dateScan = await findGreenAvailableDateWithinRange(driver, {
-          excludeKeys: triedDateKeys,
-        });
+      // If the user configured a minimum allowed date, ensure we're not stuck
+      // hunting in earlier months.
+      await ensureCalendarAtOrAfterAllowedMinMonth(driver).catch(() => {});
 
-        if (!dateScan.selected) {
-          if (dateScan.greenFound === 0) return "NO_GREEN_DATE";
-          if (dateScan.greenInRangeFound === 0) return "NO_IN_RANGE_GREEN";
-          // We may have clicked but not confirmed yet; retry quickly without
-          // touching pickup again.
+      const allowed = getAllowedDateRange();
+      const maxMonthKey = allowed.max
+        ? allowed.max.getUTCFullYear() * 12 + allowed.max.getUTCMonth()
+        : Infinity;
+
+      const maxMonths = Math.max(
+        1,
+        Number(CONFIG.CALENDAR_SCAN.MAX_MONTHS) || 6,
+      );
+      const maxDatesPerMonth = 31;
+
+      let anyGreenSeen = false;
+      let currentHeader = await getCalendarHeaderText(driver)
+        .then(parseMonthYear)
+        .catch(() => null);
+
+      for (let monthTry = 0; monthTry < maxMonths && !headerOk; monthTry += 1) {
+        if (currentHeader) {
+          reportStatus(
+            "CALENDAR_MONTH",
+            `Hunting green dates in ${currentHeader.year}-${String(currentHeader.monthIndex + 1).padStart(2, "0")}`,
+          );
+        }
+
+        // Important: rescan the current month a few times before traversing.
+        // Green dates can appear with a slight delay after UI updates.
+        const maxScansPerMonth = 2;
+        let scanTries = 0;
+        let dateTries = 0;
+
+        while (
+          !headerOk &&
+          scanTries < maxScansPerMonth &&
+          dateTries < maxDatesPerMonth
+        ) {
+          scanTries += 1;
+
+          const dateScan = await findGreenAvailableDateWithinRange(driver, {
+            excludeKeys: triedDateKeys,
+          });
+
+          if (dateScan.greenFound > 0) anyGreenSeen = true;
+
+          if (!dateScan.selected) {
+            // If we clicked but selection didn't confirm, retry quickly in this month.
+            if (dateScan.clicked) {
+              await dismissAnyOpenOverlays(driver).catch(() => {});
+              // eslint-disable-next-line no-await-in-loop
+              await sleep(80);
+              continue;
+            }
+
+            // No in-range selection yet; wait briefly and rescan this same month.
+            reportStatus(
+              "CALENDAR_RESCAN",
+              "No selectable in-range green date yet; rescanning current month",
+            );
+            await waitForLoadingOverlayToClear(driver, 1200).catch(() => true);
+            await dismissAnyOpenOverlays(driver).catch(() => {});
+            // eslint-disable-next-line no-await-in-loop
+            await sleep(180);
+            continue;
+          }
+
+          dateTries += 1;
+          if (dateScan.dateKey) triedDateKeys.add(dateScan.dateKey);
+
+          reportStatus(
+            "OVERLAY",
+            `Waiting for booking UI after date selection: ${dateScan.dateIso || dateScan.dateKey || "(unknown)"}`,
+          );
+          const cleared = await waitForLoadingOverlayToClear(
+            driver,
+            8_000,
+          ).catch(() => true);
+          if (!cleared) {
+            reportStatus(
+              "OVERLAY_TIMEOUT",
+              "Loading overlay stuck after date selection; stabilizing",
+            );
+            await refreshAndRecover(
+              driver,
+              "loading overlay stuck after date",
+              {
+                timeoutMs: 20_000,
+              },
+            ).catch(() => {});
+          }
+
           await dismissAnyOpenOverlays(driver).catch(() => {});
+
+          // Pending-mode fix: after selecting a date, the platform can still
+          // complain that no applicant is selected. Force a quick date reselect
+          // and re-confirm the checkbox.
+          if (!CONFIG.RESCHEDULE) {
+            reportStatus(
+              "APPLICANT",
+              "Re-confirming applicant after date selection",
+            );
+            await confirmApplicant(driver).catch(() => false);
+            await pulseApplicantCheckbox(driver).catch(() => false);
+            await waitForLoadingOverlayToClear(driver, 2500).catch(() => true);
+            await confirmApplicant(driver).catch(() => false);
+          }
+
+          reportStatus(
+            "HEADER",
+            `Waiting for Available Slot header (date ${dateScan.dateIso || dateScan.dateKey || "?"})`,
+          );
+          headerOk = await waitForAvailableSlotHeader(driver, 2500);
+          if (headerOk) break;
+
+          reportStatus(
+            "HEADER_MISSING_DATE",
+            `No Available Slot header for ${dateScan.dateIso || dateScan.dateKey || "(unknown)"}; trying next green date`,
+          );
           // eslint-disable-next-line no-await-in-loop
           await sleep(80);
-          continue;
         }
 
-        if (dateScan.dateKey) triedDateKeys.add(dateScan.dateKey);
-
-        reportStatus(
-          "OVERLAY",
-          `Waiting for booking UI after date selection: ${dateScan.dateIso || dateScan.dateKey || "(unknown)"}`,
-        );
-        const cleared = await waitForLoadingOverlayToClear(driver, 8_000).catch(
-          () => true,
-        );
-        if (!cleared) {
-          reportStatus(
-            "OVERLAY_TIMEOUT",
-            "Loading overlay stuck after date selection; stabilizing",
-          );
-          await refreshAndRecover(driver, "loading overlay stuck after date", {
-            timeoutMs: 20_000,
-          }).catch(() => {});
-        }
-
-        await dismissAnyOpenOverlays(driver).catch(() => {});
-
-        reportStatus(
-          "HEADER",
-          `Waiting for Available Slot header (date ${dateScan.dateIso || dateScan.dateKey || "?"})`,
-        );
-        headerOk = await waitForAvailableSlotHeader(driver, 2500);
         if (headerOk) break;
 
-        reportStatus(
-          "HEADER_MISSING_DATE",
-          `No Available Slot header for ${dateScan.dateIso || dateScan.dateKey || "(unknown)"}; trying next green date`,
-        );
-        // eslint-disable-next-line no-await-in-loop
-        await sleep(80);
+        // Do not traverse beyond the configured max date month.
+        if (currentHeader && monthKey(currentHeader) >= maxMonthKey) {
+          reportStatus(
+            "CALENDAR_MAX_MONTH",
+            "Reached maximum allowed month; cannot traverse further",
+          );
+          break;
+        }
+
+        const nav = await goToNextCalendarMonthAndWait(driver, currentHeader);
+        if (!nav.moved) {
+          reportStatus(
+            "CALENDAR_NEXT_DISABLED",
+            "Next month button disabled; cannot traverse further",
+          );
+          break;
+        }
+        currentHeader = nav.header;
+        await dismissAnyOpenOverlays(driver).catch(() => {});
+        await sleep(120);
+      }
+
+      if (!headerOk && !anyGreenSeen) {
+        return "NO_GREEN_DATE";
       }
     }
 
@@ -1429,9 +1709,18 @@ async function fastBookingAttempt(driver) {
       return "NO_AVAILABLE_SLOT_HEADER";
     }
 
-    reportStatus("SLOT", "Clicking first available time slot");
-    let slotStage1 = await clickFirstTimeSlot(driver);
-    if (!slotStage1.confirmed && slotStage1.foundAny) {
+    reportStatus(
+      "SLOT",
+      CONFIG.RESCHEDULE
+        ? "Selecting earliest available time slot (reschedule: no traversal)"
+        : "Clicking first available time slot",
+    );
+
+    let slotStage1 = CONFIG.RESCHEDULE
+      ? await clickEarliestTimeSlotOnly(driver, 6000)
+      : await clickFirstTimeSlot(driver);
+
+    if (!CONFIG.RESCHEDULE && !slotStage1.confirmed && slotStage1.foundAny) {
       reportStatus(
         "SLOT_RETRY_STAGE1",
         "Time slots detected but selection not confirmed; retrying",
@@ -1453,7 +1742,10 @@ async function fastBookingAttempt(driver) {
       );
     }
 
-    reportStatus("PROCEED", "Clicking SELECT POST AND PROCEED");
+    reportStatus(
+      "PROCEED",
+      CONFIG.RESCHEDULE ? "Clicking SELECT" : "Clicking SELECT POST AND PROCEED",
+    );
     const beforeProceedUrl = await driver.getCurrentUrl().catch(() => "");
     const beforeProceedHandles = await driver
       .getAllWindowHandles()
@@ -1513,8 +1805,15 @@ async function fastBookingAttempt(driver) {
       return "PROCEED_WHITE_SCREEN";
     }
 
-    reportStatus("SLOT_STAGE2", "Scanning for time slot buttons after proceed");
-    const slotStage2 = await clickFirstAvailableTimeSlot(driver, 6000);
+    reportStatus(
+      "SLOT_STAGE2",
+      CONFIG.RESCHEDULE
+        ? "Selecting earliest time slot after proceed (reschedule: no traversal)"
+        : "Scanning for time slot buttons after proceed",
+    );
+    const slotStage2 = CONFIG.RESCHEDULE
+      ? await clickEarliestTimeSlotOnly(driver, 6000)
+      : await clickFirstAvailableTimeSlot(driver, 6000);
     if (slotStage2.confirmed) {
       reportStatus(
         "SLOT_SELECTED_STAGE2",
@@ -2198,6 +2497,243 @@ async function clickFirstAvailableTimeSlot(driver, timeoutMs = 2500) {
   };
 }
 
+function parseTimeTextToMinutes(value) {
+  const t = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase();
+  if (!t) return null;
+
+  // Matches:
+  // - 10:30 AM
+  // - 03:15PM
+  // - 15:30
+  // - 3 PM
+  const m = t.match(/\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?\b/);
+  if (!m) return null;
+
+  let hh = Number(m[1]);
+  const mm = m[2] != null ? Number(m[2]) : 0;
+  const ap = m[3] || null;
+
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  if (mm < 0 || mm > 59) return null;
+
+  if (ap) {
+    if (hh < 1 || hh > 12) return null;
+    if (ap === "AM") {
+      if (hh === 12) hh = 0;
+    } else if (ap === "PM") {
+      if (hh !== 12) hh += 12;
+    }
+  } else {
+    // No AM/PM; treat as 24h clock when possible.
+    if (hh < 0 || hh > 23) return null;
+  }
+
+  return hh * 60 + mm;
+}
+
+async function clickEarliestTimeSlotOnly(driver, timeoutMs = 6000) {
+  const start = Date.now();
+
+  const looksLikeTimeText = (txt) => {
+    const t = String(txt || "").trim();
+    if (!t) return false;
+    return (
+      /\b\d{1,2}:\d{2}\s*(AM|PM)?\b/i.test(t) ||
+      /\b\d{1,2}\s*(AM|PM)\b/i.test(t)
+    );
+  };
+
+  async function isEnabledClickable(el) {
+    try {
+      const disabledAttr = await el.getAttribute("disabled");
+      const ariaDisabled = await el.getAttribute("aria-disabled");
+      if (disabledAttr || ariaDisabled === "true") return false;
+    } catch {
+      // ignore
+    }
+    try {
+      if (!(await el.isDisplayed())) return false;
+    } catch {
+      // ignore
+    }
+    return true;
+  }
+
+  async function isGreenButton(el) {
+    const colors = [];
+    try {
+      colors.push(await el.getCssValue("background-color"));
+    } catch {
+      // ignore
+    }
+
+    try {
+      const wrapper = await el.findElement(By.css(".mat-button-wrapper"));
+      colors.push(await wrapper.getCssValue("background-color"));
+    } catch {
+      // ignore
+    }
+
+    try {
+      const span = await el.findElement(By.css("span"));
+      colors.push(await span.getCssValue("background-color"));
+    } catch {
+      // ignore
+    }
+
+    return colors.some((c) => isGreenAvailableColor(c));
+  }
+
+  async function isSelectedSlot(el) {
+    try {
+      const cls = String((await el.getAttribute("class")) || "");
+      if (cls.includes("selected-slot")) return true;
+    } catch {
+      // ignore
+    }
+
+    try {
+      const bg = await el.getCssValue("background-color");
+      const rgb = normalizeRgb(bg);
+      if (!rgb) return false;
+      if (rgb.a === 0) return false;
+      if (isGreenAvailableColor(bg)) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  let foundAny = false;
+  let clickedAny = false;
+  let lastPickedText = null;
+  let desiredMinutes = null;
+
+  while (Date.now() - start < timeoutMs) {
+    // eslint-disable-next-line no-await-in-loop
+    const slotButtonsPreferred = await driver
+      .findElements(
+        By.css(
+          ".ofc-appoinment-sloat-block .booking-time-buttons.slot_calender button.green-button, .booking-time-buttons.slot_calender button.green-button",
+        ),
+      )
+      .catch(() => []);
+
+    // eslint-disable-next-line no-await-in-loop
+    const candidates =
+      slotButtonsPreferred.length > 0
+        ? slotButtonsPreferred
+        : await driver
+            .findElements(
+              By.xpath(
+                "//button[contains(normalize-space(.), ':') or contains(translate(normalize-space(.),'amp','AMP'),'AM') or contains(translate(normalize-space(.),'amp','AMP'),'PM')] | //a[contains(normalize-space(.), ':') or contains(translate(normalize-space(.),'amp','AMP'),'AM') or contains(translate(normalize-space(.),'amp','AMP'),'PM')] | //*[@role='button' and (contains(normalize-space(.), ':') or contains(translate(normalize-space(.),'amp','AMP'),'AM') or contains(translate(normalize-space(.),'amp','AMP'),'PM'))]",
+              ),
+            )
+            .catch(() => []);
+
+    const green = [];
+    const anyTime = [];
+
+    for (const el of candidates) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const txt = ((await el.getText()) || "").trim();
+        if (!looksLikeTimeText(txt)) continue;
+        // eslint-disable-next-line no-await-in-loop
+        if (!(await isEnabledClickable(el))) continue;
+
+        const minutes = parseTimeTextToMinutes(txt);
+        // eslint-disable-next-line no-await-in-loop
+        const isGreen = await isGreenButton(el);
+        if (isGreen) green.push({ el, txt, minutes });
+        else anyTime.push({ el, txt, minutes });
+      } catch {
+        // ignore
+      }
+    }
+
+    if (green.length > 0 || anyTime.length > 0) foundAny = true;
+
+    const sortByMinutes = (a, b) => {
+      const am = Number.isFinite(a.minutes) ? a.minutes : Number.POSITIVE_INFINITY;
+      const bm = Number.isFinite(b.minutes) ? b.minutes : Number.POSITIVE_INFINITY;
+      if (am !== bm) return am - bm;
+      return String(a.txt).localeCompare(String(b.txt));
+    };
+
+    green.sort(sortByMinutes);
+    anyTime.sort(sortByMinutes);
+
+    const pick = green.length > 0 ? green[0] : anyTime.length > 0 ? anyTime[0] : null;
+    if (!pick) {
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(250);
+      continue;
+    }
+
+    // Once we decide the earliest slot, keep retrying ONLY that slot.
+    if (desiredMinutes == null && Number.isFinite(pick.minutes)) {
+      desiredMinutes = pick.minutes;
+    }
+    clickedAny = true;
+    lastPickedText = pick.txt;
+
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await driver.executeScript(
+        "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+        pick.el,
+      );
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(150);
+      // eslint-disable-next-line no-await-in-loop
+      await safeClick(driver, pick.el);
+
+      // eslint-disable-next-line no-await-in-loop
+      const selected = await driver
+        .wait(async () => isSelectedSlot(pick.el), 2500)
+        .catch(() => false);
+
+      if (!selected) {
+        reportStatus(
+          "SLOT_CLICK_NO_CONFIRM",
+          `Clicked earliest time slot but selection not confirmed yet: ${pick.txt}`,
+        );
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(250);
+        continue;
+      }
+
+      reportStatus(
+        "SLOT_SELECTED",
+        `Time slot selected (earliest): ${pick.txt}${green.length > 0 ? " (green)" : ""}`,
+      );
+      return {
+        foundAny: true,
+        clicked: true,
+        confirmed: true,
+        text: pick.txt,
+      };
+    } catch {
+      // ignore and retry within timeout (same earliest slot)
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(250);
+  }
+
+  return {
+    foundAny,
+    clicked: clickedAny,
+    confirmed: false,
+    text: lastPickedText,
+    desiredMinutes,
+  };
+}
+
 async function proceedIfAvailableSlotsVisible(driver) {
   // When a date is truly available, the UI shows available slots and a proceed button.
   // We don't finalize booking here; we just move forward to prove the flow is working.
@@ -2205,22 +2741,34 @@ async function proceedIfAvailableSlotsVisible(driver) {
     "//button[(contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'SELECT POST') and contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'PROCEED'))]";
   const xpathBookPost =
     "//button[(contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'BOOK') and contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'POST') and contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'APPOINTMENT'))]";
+  const xpathSelectOnlyNearSlots =
+    "(//*[contains(normalize-space(.), 'Available Slot') or contains(normalize-space(.), 'Available Slots')])[1]/following::button[not(@disabled) and (normalize-space(.)='SELECT' or contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'SELECT'))][1]";
 
   const selectProceedBtn = await driver
     .wait(until.elementLocated(By.xpath(xpathSelectProceed)), 12_000)
     .catch(() => null);
 
-  const proceedBtn =
-    selectProceedBtn ||
-    (await driver
-      .wait(until.elementLocated(By.xpath(xpathBookPost)), 2500)
-      .catch(() => null));
+  const bookPostBtn = selectProceedBtn
+    ? null
+    : await driver
+        .wait(until.elementLocated(By.xpath(xpathBookPost)), 2500)
+        .catch(() => null);
+
+  const selectOnlyBtn = selectProceedBtn || bookPostBtn
+    ? null
+    : await driver
+        .wait(until.elementLocated(By.xpath(xpathSelectOnlyNearSlots)), 1500)
+        .catch(() => null);
+
+  const proceedBtn = selectProceedBtn || bookPostBtn || selectOnlyBtn;
 
   const kind = selectProceedBtn
     ? "SELECT_POST_AND_PROCEED"
-    : proceedBtn
+    : bookPostBtn
       ? "BOOK_POST_APPOINTMENT"
-      : null;
+      : selectOnlyBtn
+        ? "SELECT"
+        : null;
 
   if (!proceedBtn) return { clicked: false, kind: null, text: null };
 
