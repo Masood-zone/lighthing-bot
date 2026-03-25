@@ -398,8 +398,16 @@ async function attemptBooking(page) {
   // Reschedule-only edge case: if no usable date appears, refresh pickup once
   // and give the calendar one more fast pass. This does not affect the normal path.
   if (!dateSelected && CONFIG.RESCHEDULE) {
+    status(
+      "RESCHEDULE_FALLBACK",
+      "No usable date after traversal; refreshing pickup once and retrying",
+    );
     const refreshed = await refreshPickupByToggle(page).catch(() => false);
     if (refreshed) {
+      status(
+        "RESCHEDULE_FALLBACK",
+        "Pickup refreshed; running a second fast date hunt",
+      );
       ({ dateSelected, monthAttempts } = await huntGreenDate(page));
       if (monthAttempts > 0) {
         status(
