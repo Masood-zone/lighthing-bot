@@ -216,6 +216,68 @@ async function canGoToNextCalendarMonth(page) {
   });
 }
 
+async function huntGreenDate(page) {
+  let dateSelected = await clickFirstGreenDate(page);
+  let monthAttempts = 0;
+
+  while (
+    !dateSelected &&
+    monthAttempts < CONFIG.MAX_MONTHS - 1 &&
+    (await canGoToNextCalendarMonth(page))
+  ) {
+    const moved = await clickNextCalendarMonth(page);
+    if (!moved) break;
+    monthAttempts += 1;
+    dateSelected = await clickFirstGreenDate(page);
+  }
+
+  return { dateSelected, monthAttempts };
+}
+
+async function refreshPickupByToggle(page) {
+  status(
+    "PICKUP_REFRESH",
+    "Reschedule fallback: toggling pickup to force refresh",
+  );
+
+  const selectedName = CONFIG.PICKUP_POINT;
+  const pickupSelect = page.locator("mat-select").first();
+  await pickupSelect.click({ timeout: 5000, force: true });
+
+  const optionCount = await page
+    .locator("mat-option")
+    .count()
+    .catch(() => 0);
+  if (optionCount < 2) {
+    await pickupSelect.click({ timeout: 2000, force: true }).catch(() => {});
+    return false;
+  }
+
+  let alternateClicked = false;
+  for (let index = 0; index < optionCount; index += 1) {
+    const option = page.locator("mat-option").nth(index);
+    const text = String(await option.textContent().catch(() => "")).trim();
+    if (!text || text.includes(selectedName)) continue;
+    await option.click({ timeout: 3000, force: true });
+    alternateClicked = true;
+    break;
+  }
+
+  if (!alternateClicked) {
+    await pickupSelect.click({ timeout: 2000, force: true }).catch(() => {});
+    return false;
+  }
+
+  await pickupSelect.click({ timeout: 5000, force: true });
+  await page
+    .locator("mat-option")
+    .filter({ hasText: selectedName })
+    .first()
+    .click({ timeout: 5000, force: true });
+
+  return true;
+}
+
 async function clickEarliestTimeSlot(page) {
   const result = await page.evaluate(() => {
     const isVisible = (element) => {
@@ -324,25 +386,28 @@ async function attemptBooking(page) {
     await ensureApplicantChecked(page);
   }
 
-  let dateSelected = await clickFirstGreenDate(page);
-  let monthAttempts = 0;
-
-  while (
-    !dateSelected &&
-    monthAttempts < CONFIG.MAX_MONTHS - 1 &&
-    (await canGoToNextCalendarMonth(page))
-  ) {
-    const moved = await clickNextCalendarMonth(page);
-    if (!moved) break;
-    monthAttempts += 1;
-    dateSelected = await clickFirstGreenDate(page);
-  }
+  let { dateSelected, monthAttempts } = await huntGreenDate(page);
 
   if (monthAttempts > 0) {
     status(
       "CALENDAR",
       `Traversed ${monthAttempts + 1} month(s) in this attempt`,
     );
+  }
+
+  // Reschedule-only edge case: if no usable date appears, refresh pickup once
+  // and give the calendar one more fast pass. This does not affect the normal path.
+  if (!dateSelected && CONFIG.RESCHEDULE) {
+    const refreshed = await refreshPickupByToggle(page).catch(() => false);
+    if (refreshed) {
+      ({ dateSelected, monthAttempts } = await huntGreenDate(page));
+      if (monthAttempts > 0) {
+        status(
+          "CALENDAR",
+          `Traversed ${monthAttempts + 1} month(s) after pickup refresh`,
+        );
+      }
+    }
   }
 
   if (!dateSelected) {
