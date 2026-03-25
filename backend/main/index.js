@@ -29,13 +29,33 @@ const CONFIG = {
     Number(process.env.VISA_ATTEMPT_BURST_INTERVAL_MS) || 250,
   ),
   MAX_MONTHS: Math.max(1, Number(process.env.VISA_CALENDAR_MAX_MONTHS) || 6),
+  LOGIN_WAIT_TIMEOUT_MS: Math.max(
+    60_000,
+    Number(process.env.VISA_LOGIN_WAIT_TIMEOUT_MS) || 15 * 60 * 1000,
+  ),
   PROFILE_DIR: process.env.VISA_PROFILE_DIR || "",
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function sendWorkerMessage(message) {
+  try {
+    if (typeof process.send === "function") {
+      process.send(message);
+    }
+  } catch {
+    // Never let IPC block the worker.
+  }
+}
+
 function status(state, message) {
   console.log(`[${state}] ${message}`);
+  sendWorkerMessage({
+    type: "status",
+    sessionId: CONFIG.SESSION_ID,
+    state,
+    message,
+  });
 }
 
 async function launchBrowser() {
@@ -83,7 +103,10 @@ async function launchBrowser() {
   return { browser, context, page };
 }
 
-async function waitForLoginOrDashboard(page, timeoutMs = 5 * 60 * 1000) {
+async function waitForLoginOrDashboard(
+  page,
+  timeoutMs = CONFIG.LOGIN_WAIT_TIMEOUT_MS,
+) {
   const dashboardWait = page
     .waitForURL(/dashboard/i, { timeout: timeoutMs })
     .then(() => true)
@@ -442,6 +465,7 @@ async function attemptBooking(page) {
 async function main() {
   status("START", "Launching fast Playwright worker");
   const { browser, context, page } = await launchBrowser();
+  let completionReported = false;
 
   try {
     await login(page);
@@ -454,6 +478,10 @@ async function main() {
 
       if (result === "done") {
         status("SUCCESS", "Fast attempt completed; continuing monitor loop");
+        if (!completionReported) {
+          completionReported = true;
+          status("COMPLETED", "Booking flow completed successfully");
+        }
       }
 
       await sleep(
