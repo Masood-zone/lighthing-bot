@@ -655,6 +655,14 @@ async function refreshPickupByToggle(page) {
   );
 
   const selectedName = CONFIG.PICKUP_POINT;
+  const normalize = (text) =>
+    String(text || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toUpperCase();
+  const escapeRegExp = (value) =>
+    String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
   // Critical: scope to booking block; never interact with sidebar Language select.
   // The platform refreshes availability only when we re-open the pickup select,
   // choose the placeholder "Select", then choose Accra again.
@@ -662,34 +670,76 @@ async function refreshPickupByToggle(page) {
   const pickupSelect = bookingBlock
     .locator("mat-select[panelclass*='drop-down-panelcls'], mat-select")
     .first();
+
+  // New refresh behavior: select the option immediately BEFORE the current
+  // pickup point (e.g. before "Accra"), then select the pickup point again.
+  // This forces the platform to refresh availability.
   await pickupSelect.click({ timeout: 5000, force: true });
 
-  const selectOption = page
-    .locator("mat-option")
-    .filter({ hasText: /^\s*Select\s*$/i })
-    .first();
+  const options = page.locator("mat-option");
+  await options.first().waitFor({ state: "visible", timeout: 5000 });
 
-  const targetOption = page
-    .locator("mat-option")
-    .filter({ hasText: selectedName })
-    .first();
-
-  if (await selectOption.count().catch(() => 0)) {
-    await selectOption.click({ timeout: 3000, force: true });
-    await page.waitForTimeout(200);
-  } else {
-    await pickupSelect.click({ timeout: 2000, force: true }).catch(() => {});
-    await page.waitForTimeout(200);
+  const optionTexts = await options.allTextContents().catch(() => []);
+  const normTarget = normalize(selectedName);
+  let targetIndex = optionTexts.findIndex((t) => normalize(t) === normTarget);
+  if (targetIndex < 0) {
+    targetIndex = optionTexts.findIndex((t) =>
+      normalize(t).includes(normTarget),
+    );
   }
 
-  await pickupSelect.click({ timeout: 5000, force: true });
+  const selectIndex = optionTexts.findIndex((t) =>
+    /^SELECT$/i.test(normalize(t)),
+  );
 
-  if (!(await targetOption.count().catch(() => 0))) {
+  let priorIndex = targetIndex - 1;
+  while (
+    priorIndex >= 0 &&
+    (!normalize(optionTexts[priorIndex]) ||
+      normalize(optionTexts[priorIndex]) === normTarget)
+  ) {
+    priorIndex -= 1;
+  }
+
+  const canToggleToPrior = targetIndex > 0 && priorIndex >= 0;
+
+  if (canToggleToPrior) {
+    const priorLabel = optionTexts[priorIndex];
+    status(
+      "PICKUP_REFRESH",
+      `Refreshing pickup: ${priorLabel.trim()} -> ${selectedName}`,
+    );
+    await options.nth(priorIndex).click({ timeout: 5000, force: true });
+    await page.waitForTimeout(200);
+  } else if (selectIndex >= 0) {
+    status("PICKUP_REFRESH", `Refreshing pickup: Select -> ${selectedName}`);
+    await options.nth(selectIndex).click({ timeout: 5000, force: true });
+    await page.waitForTimeout(200);
+  } else {
+    // Could not find either a prior option or the "Select" placeholder.
+    // Bail out rather than repeatedly re-selecting the same pickup.
     return false;
   }
 
-  await targetOption.click({ timeout: 5000, force: true });
+  await pickupSelect.click({ timeout: 5000, force: true });
 
+  const reopenedOptions = page.locator("mat-option");
+  await reopenedOptions.first().waitFor({ state: "visible", timeout: 5000 });
+
+  // Always select by label text after reopening to avoid stale indices.
+  const exactTarget = reopenedOptions
+    .filter({
+      hasText: new RegExp(`^\\s*${escapeRegExp(selectedName)}\\s*$`, "i"),
+    })
+    .first();
+  if (await exactTarget.count().catch(() => 0)) {
+    await exactTarget.click({ timeout: 5000, force: true });
+    return true;
+  }
+
+  const fuzzyTarget = reopenedOptions.filter({ hasText: selectedName }).first();
+  if (!(await fuzzyTarget.count().catch(() => 0))) return false;
+  await fuzzyTarget.click({ timeout: 5000, force: true });
   return true;
 }
 
