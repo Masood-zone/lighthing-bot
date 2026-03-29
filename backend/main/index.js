@@ -343,6 +343,135 @@ async function waitForAppointmentBookingPageReady(page, timeoutMs = 60000) {
   return true;
 }
 
+async function waitForCalendarUiReady(page, timeoutMs = 45000) {
+  const bookingBlock = getBookingBlockLocator(page);
+  try {
+    await bookingBlock.waitFor({ state: "visible", timeout: timeoutMs });
+  } catch {
+    return false;
+  }
+
+  // Wait for any common loading overlays to clear.
+  await page
+    .locator(".ngx-spinner-overlay")
+    .first()
+    .waitFor({ state: "detached", timeout: timeoutMs })
+    .catch(() => {});
+
+  // Ensure the calendar header and day grid exist before scanning.
+  // If these aren't present yet, the date hunt can incorrectly conclude "no dates".
+  await page
+    .locator(".mat-calendar-period-button")
+    .first()
+    .waitFor({ state: "visible", timeout: timeoutMs })
+    .catch(() => {});
+
+  try {
+    await page
+      .locator(
+        "button.mat-calendar-body-cell, td.mat-calendar-body-cell, .mat-calendar-body-cell-content",
+      )
+      .first()
+      .waitFor({ state: "visible", timeout: timeoutMs });
+  } catch {
+    return false;
+  }
+
+  // Tiny settle so computed styles are stable (used by the green-date detector).
+  await page.waitForTimeout(150);
+  return true;
+}
+
+async function waitForTimeSlotsUiReady(page, timeoutMs = 20000) {
+  const bookingBlock = getBookingBlockLocator(page);
+  try {
+    await bookingBlock.waitFor({ state: "visible", timeout: timeoutMs });
+  } catch {
+    return false;
+  }
+
+  // After selecting a date, the platform often loads slots asynchronously.
+  // Wait for spinner to clear, then for at least one visible time-like slot.
+  await page
+    .locator(".ngx-spinner-overlay")
+    .first()
+    .waitFor({ state: "detached", timeout: timeoutMs })
+    .catch(() => {});
+
+  const timeCandidate = bookingBlock
+    .locator("button, a, [role='button']")
+    .filter({ hasText: /\b\d{1,2}:\d{2}\b/ })
+    .first();
+
+  try {
+    await timeCandidate.waitFor({ state: "visible", timeout: timeoutMs });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForProceedActionable(page, timeoutMs = 20000) {
+  const bookingBlock = getBookingBlockLocator(page);
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    // eslint-disable-next-line no-await-in-loop
+    const ok = await bookingBlock
+      .evaluate((root, reschedule) => {
+        const isVisible = (element) => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            rect.width > 0 &&
+            rect.height > 0
+          );
+        };
+
+        const buttons = Array.from(
+          root.querySelectorAll("button, a, [role='button']"),
+        )
+          .map((element) => ({
+            element,
+            text: String(element.textContent || "")
+              .replace(/\s+/g, " ")
+              .trim()
+              .toUpperCase(),
+          }))
+          .filter(
+            ({ element, text }) =>
+              isVisible(element) &&
+              text &&
+              element.getAttribute("aria-disabled") !== "true" &&
+              !element.disabled,
+          );
+
+        const pick = buttons.find(({ text }) => {
+          if (reschedule) {
+            return /\bSELECT\b/i.test(text) || /\bPROCEED\b/i.test(text);
+          }
+          return (
+            /SELECT POST/i.test(text) ||
+            /PROCEED/i.test(text) ||
+            /BOOK/i.test(text)
+          );
+        });
+
+        return Boolean(pick);
+      }, CONFIG.RESCHEDULE)
+      .catch(() => false);
+
+    if (ok) return true;
+
+    // eslint-disable-next-line no-await-in-loop
+    await page.waitForTimeout(250);
+  }
+
+  return false;
+}
+
 async function openAppointmentMode(page) {
   const targetText = CONFIG.RESCHEDULE ? "RESCHEDULE" : "PENDING APPOINTMENT";
   status("MODE", `Opening ${targetText}`);
@@ -751,10 +880,16 @@ async function refreshPickupAndRetryDateHunt(page, reason) {
       : "No usable date after traversal; refreshing pickup and retrying",
   );
 
+  // If the calendar is still booting, do not refresh pickup yet.
+  await waitForCalendarUiReady(page, 45000).catch(() => false);
+
   const refreshed = await refreshPickupByToggle(page).catch(() => false);
   if (!refreshed) {
     return { refreshed: false, dateSelected: null, monthAttempts: 0 };
   }
+
+  // After changing pickup, wait for the calendar to refresh before scanning again.
+  await waitForCalendarUiReady(page, 45000).catch(() => false);
 
   status("PICKUP_REFRESH", "Pickup refreshed; running a second fast date hunt");
   const { dateSelected, monthAttempts } = await huntGreenDate(page);
@@ -769,6 +904,9 @@ async function refreshPickupAndRetryDateHunt(page, reason) {
 }
 
 async function clickEarliestTimeSlot(page) {
+  // Do a short wait for slots to populate so we don't prematurely return "No time slot".
+  await waitForTimeSlotsUiReady(page, 15000).catch(() => false);
+
   const bookingBlock = getBookingBlockLocator(page);
   const result = await bookingBlock.evaluate((root) => {
     const isVisible = (element) => {
@@ -815,6 +953,9 @@ async function clickEarliestTimeSlot(page) {
 }
 
 async function clickProceedButton(page) {
+  const ready = await waitForProceedActionable(page, 15000).catch(() => false);
+  if (!ready) return false;
+
   const bookingBlock = getBookingBlockLocator(page);
   const result = await bookingBlock.evaluate((root, reschedule) => {
     const isVisible = (element) => {
@@ -864,6 +1005,15 @@ async function clickProceedButton(page) {
 
   if (result) {
     status("PROCEED", `Clicked ${result}`);
+
+    // Best-effort: wait for any post-click loading to settle so the next loop
+    // doesn't race the UI.
+    await page
+      .locator(".ngx-spinner-overlay")
+      .first()
+      .waitFor({ state: "detached", timeout: 20000 })
+      .catch(() => {});
+
     return true;
   }
 
@@ -872,6 +1022,14 @@ async function clickProceedButton(page) {
 
 async function attemptBooking(page) {
   await openAppointmentMode(page);
+
+  const calendarReady = await waitForCalendarUiReady(page, 60000).catch(
+    () => false,
+  );
+  if (!calendarReady) {
+    status("CALENDAR", "Calendar not ready yet; skipping scan this loop");
+    return "idle";
+  }
 
   if (!CONFIG.RESCHEDULE) {
     await ensureApplicantChecked(page);
@@ -902,11 +1060,29 @@ async function attemptBooking(page) {
     return "idle";
   }
 
+  status("SLOT", "Waiting for time slots to load");
+  const slotsReady = await waitForTimeSlotsUiReady(page, 25000).catch(
+    () => false,
+  );
+  if (!slotsReady) {
+    status("SLOT", "Time slots did not load in time");
+    return "date";
+  }
+
   // Keep the time selection fast: choose the earliest visible slot only.
   const slotSelected = await clickEarliestTimeSlot(page);
   if (!slotSelected) {
     status("SLOT", "No time slot found");
     return "date";
+  }
+
+  status("PROCEED", "Waiting for proceed/select button");
+  const proceedReady = await waitForProceedActionable(page, 20000).catch(
+    () => false,
+  );
+  if (!proceedReady) {
+    status("PROCEED", "Proceed/select button not ready");
+    return "slot";
   }
 
   const proceeded = await clickProceedButton(page);
