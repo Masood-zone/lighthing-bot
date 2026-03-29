@@ -349,7 +349,7 @@ async function waitForAppointmentBookingPageReady(page, timeoutMs = 60000) {
   await page
     .locator(".ngx-spinner-overlay")
     .first()
-    .waitFor({ state: "detached", timeout: timeoutMs })
+    .waitFor({ state: "hidden", timeout: timeoutMs })
     .catch(() => {});
 
   return true;
@@ -367,7 +367,7 @@ async function waitForCalendarUiReady(page, timeoutMs = 45000) {
   await page
     .locator(".ngx-spinner-overlay")
     .first()
-    .waitFor({ state: "detached", timeout: timeoutMs })
+    .waitFor({ state: "hidden", timeout: timeoutMs })
     .catch(() => {});
 
   // Ensure the calendar header and day grid exist before scanning.
@@ -402,25 +402,53 @@ async function waitForTimeSlotsUiReady(page, timeoutMs = 20000) {
     return false;
   }
 
-  // After selecting a date, the platform often loads slots asynchronously.
-  // Wait for spinner to clear, then for at least one visible time-like slot.
-  await page
-    .locator(".ngx-spinner-overlay")
-    .first()
-    .waitFor({ state: "detached", timeout: timeoutMs })
-    .catch(() => {});
+  // Slots can appear while a spinner overlay still exists (but hidden), and
+  // sometimes the time text is not directly on the clickable element.
+  // So we poll for *any visible time-like text* in the booking block.
+  const timeText = /\b\d{1,2}:\d{2}\s*(AM|PM)?\b/i;
+  const start = Date.now();
 
-  const timeCandidate = bookingBlock
-    .locator("button, a, [role='button']")
-    .filter({ hasText: /\b\d{1,2}:\d{2}\b/ })
-    .first();
+  const spinner = page.locator(".ngx-spinner-overlay").first();
 
-  try {
-    await timeCandidate.waitFor({ state: "visible", timeout: timeoutMs });
-    return true;
-  } catch {
-    return false;
+  while (Date.now() - start < timeoutMs) {
+    // Prefer "slots exist" over "spinner gone".
+    // eslint-disable-next-line no-await-in-loop
+    const anyVisibleTime = await bookingBlock
+      .getByText(timeText, { exact: false })
+      .first()
+      .isVisible()
+      .catch(() => false);
+    if (anyVisibleTime) return true;
+
+    // Some builds render the slot list outside `.ofc-book-slot-block`.
+    // Fall back to a global check before timing out.
+    // eslint-disable-next-line no-await-in-loop
+    const anyVisibleTimeGlobal = await page
+      .getByText(timeText, { exact: false })
+      .first()
+      .isVisible()
+      .catch(() => false);
+    if (anyVisibleTimeGlobal) return true;
+
+    // eslint-disable-next-line no-await-in-loop
+    const spinnerVisible = await spinner.isVisible().catch(() => false);
+    if (!spinnerVisible) {
+      // If spinner is not visible, do one extra quick check for clickable slots.
+      // eslint-disable-next-line no-await-in-loop
+      const clickableVisible = await bookingBlock
+        .locator("button, a, [role='button']")
+        .filter({ hasText: timeText })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (clickableVisible) return true;
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    await page.waitForTimeout(250);
   }
+
+  return false;
 }
 
 async function waitForProceedActionable(page, timeoutMs = 20000) {
@@ -508,23 +536,93 @@ async function openAppointmentMode(page) {
         "a.my-app-button-popup-resch, a:has-text('RESCHEDULE'), button:has-text('RESCHEDULE')",
       )
       .first();
-    await rescheduleBtn.waitFor({ state: "visible", timeout: 15000 });
+
+    let rescheduleVisible = await rescheduleBtn
+      .waitFor({ state: "visible", timeout: 30000 })
+      .then(() => true)
+      .catch(() => false);
+
+    if (!rescheduleVisible) {
+      // Sometimes the my-appointments page needs one reload to fully hydrate.
+      await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+      await page.waitForTimeout(800).catch(() => {});
+      rescheduleVisible = await rescheduleBtn
+        .waitFor({ state: "visible", timeout: 30000 })
+        .then(() => true)
+        .catch(() => false);
+    }
+
+    if (!rescheduleVisible) {
+      throw new Error("Reschedule button not found on My Appointments.");
+    }
+
+    // Some flows show a native browser confirm dialog, others show an Angular
+    // mat-dialog, and sometimes it navigates directly to the booking UI.
+    const onNativeDialog = async (dialog) => {
+      try {
+        status("RESCHEDULE_CONFIRM", "Accepting browser dialog");
+        await dialog.accept();
+      } catch {
+        // ignore
+      }
+    };
+    page.once("dialog", onNativeDialog);
+
     await rescheduleBtn.click({ timeout: 15000, force: true });
     status("RESCHEDULE_CLICK", "Clicked RESCHEDULE");
 
-    const dialog = page
+    const bookingBlockAfterClick = getBookingBlockLocator(page);
+    const angularDialog = page
       .locator("mat-dialog-container, [role='dialog']")
       .first();
-    await dialog.waitFor({ state: "visible", timeout: 15000 });
 
-    const confirmBtn = dialog
-      .locator("button:has-text('Confirm'), button:has-text('CONFIRM')")
-      .first();
-    await confirmBtn.waitFor({ state: "visible", timeout: 15000 });
-    await confirmBtn.click({ timeout: 15000, force: true });
-    status("RESCHEDULE_CONFIRM", "Clicked Confirm");
+    const reachedBooking = bookingBlockAfterClick
+      .waitFor({ state: "visible", timeout: 30000 })
+      .then(() => "BOOKING")
+      .catch(() => null);
 
-    await dialog.waitFor({ state: "detached", timeout: 15000 }).catch(() => {});
+    const reachedDialog = angularDialog
+      .waitFor({ state: "visible", timeout: 30000 })
+      .then(() => "DIALOG")
+      .catch(() => null);
+
+    const next = await Promise.race([reachedBooking, reachedDialog]).catch(
+      () => null,
+    );
+
+    if (next === "DIALOG") {
+      const confirmBtn = angularDialog
+        .locator(
+          "button:has-text('Confirm'), button:has-text('CONFIRM'), button:has-text('Yes'), button:has-text('YES'), button:has-text('Ok'), button:has-text('OK')",
+        )
+        .first();
+      const confirmVisible = await confirmBtn
+        .waitFor({ state: "visible", timeout: 30000 })
+        .then(() => true)
+        .catch(() => false);
+
+      if (confirmVisible) {
+        await confirmBtn.click({ timeout: 15000, force: true });
+        status("RESCHEDULE_CONFIRM", "Confirmed reschedule dialog");
+      }
+
+      await angularDialog
+        .waitFor({ state: "detached", timeout: 30000 })
+        .catch(() => {});
+
+      await bookingBlockAfterClick
+        .waitFor({ state: "visible", timeout: 60000 })
+        .catch(() => {});
+    } else if (next === "BOOKING") {
+      // No dialog; we reached the booking UI directly.
+      status("RESCHEDULE_CONFIRM", "Reschedule opened booking UI");
+    } else {
+      // If neither appeared, continue; the global booking wait below will decide.
+      status(
+        "RESCHEDULE_CONFIRM",
+        "No dialog/booking detected yet; continuing",
+      );
+    }
   } else {
     // Match Selenium: exact dashboard label first, then click the nearest
     // actionable ancestor rather than a broad text match.
@@ -993,7 +1091,7 @@ async function clickEarliestTimeSlot(page) {
   await waitForTimeSlotsUiReady(page, 15000).catch(() => false);
 
   const bookingBlock = getBookingBlockLocator(page);
-  const result = await bookingBlock.evaluate((root) => {
+  let result = await bookingBlock.evaluate((root) => {
     const isVisible = (element) => {
       const style = window.getComputedStyle(element);
       const rect = element.getBoundingClientRect();
@@ -1005,29 +1103,130 @@ async function clickEarliestTimeSlot(page) {
       );
     };
 
-    const slots = Array.from(
-      root.querySelectorAll("button, a, [role='button']"),
-    );
+    const timeRe = /\b(\d{1,2}):(\d{2})\s*(AM|PM)?\b/i;
 
-    const pick = slots.find((element) => {
-      const text = String(element.innerText || element.textContent || "")
-        .replace(/\s+/g, " ")
-        .trim();
-      return (
-        text &&
-        /\b\d{1,2}:\d{2}\b/.test(text) &&
-        isVisible(element) &&
-        !element.disabled &&
-        element.getAttribute("aria-disabled") !== "true"
-      );
-    });
+    const parseToMinutes = (text) => {
+      const m = String(text || "").match(timeRe);
+      if (!m) return null;
+      const hh = Number(m[1]);
+      const mm = Number(m[2]);
+      const ampm = (m[3] || "").toUpperCase();
+      if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+      if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
 
-    if (!pick) return null;
+      if (ampm === "AM" || ampm === "PM") {
+        let h = hh % 12;
+        if (ampm === "PM") h += 12;
+        return h * 60 + mm;
+      }
 
-    pick.scrollIntoView({ block: "center", inline: "nearest" });
-    pick.click();
-    return String(pick.innerText || pick.textContent || "").trim();
+      // If AM/PM isn't present, treat as 24h.
+      return hh * 60 + mm;
+    };
+
+    const all = Array.from(root.querySelectorAll("*"));
+
+    const candidates = all
+      .map((node) => {
+        const text = String(node.innerText || node.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (!text) return null;
+        if (!timeRe.test(text)) return null;
+        if (!isVisible(node)) return null;
+
+        const clickable = node.closest("button, a, [role='button']") || node;
+        const clickableText = String(
+          clickable.innerText || clickable.textContent || text,
+        )
+          .replace(/\s+/g, " ")
+          .trim();
+
+        const minutes = parseToMinutes(clickableText) ?? parseToMinutes(text);
+        if (minutes == null) return null;
+
+        const disabled =
+          clickable.getAttribute("aria-disabled") === "true" ||
+          clickable.disabled === true;
+        if (disabled) return null;
+        if (!isVisible(clickable)) return null;
+
+        return { clickable, label: clickableText || text, minutes };
+      })
+      .filter(Boolean);
+
+    if (!candidates.length) return null;
+
+    // Pick the earliest time (minutes since midnight).
+    candidates.sort((a, b) => a.minutes - b.minutes);
+    const pick = candidates[0];
+    pick.clickable.scrollIntoView({ block: "center", inline: "nearest" });
+    pick.clickable.click();
+    return pick.label;
   });
+
+  if (!result) {
+    // Fallback: click a time slot even if the slot list is outside the booking block.
+    result = await page
+      .evaluate(() => {
+        const isVisible = (element) => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            rect.width > 0 &&
+            rect.height > 0
+          );
+        };
+
+        const timeRe = /\b(\d{1,2}):(\d{2})\s*(AM|PM)?\b/i;
+        const parseToMinutes = (text) => {
+          const m = String(text || "").match(timeRe);
+          if (!m) return null;
+          const hh = Number(m[1]);
+          const mm = Number(m[2]);
+          const ampm = (m[3] || "").toUpperCase();
+          if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+          if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+
+          if (ampm === "AM" || ampm === "PM") {
+            let h = hh % 12;
+            if (ampm === "PM") h += 12;
+            return h * 60 + mm;
+          }
+
+          return hh * 60 + mm;
+        };
+
+        const clickables = Array.from(
+          document.querySelectorAll("button, a, [role='button']"),
+        )
+          .map((element) => {
+            const text = String(element.innerText || element.textContent || "")
+              .replace(/\s+/g, " ")
+              .trim();
+            const minutes = parseToMinutes(text);
+            if (!text || minutes == null) return null;
+            if (!isVisible(element)) return null;
+            if (
+              element.getAttribute("aria-disabled") === "true" ||
+              element.disabled === true
+            )
+              return null;
+            return { element, text, minutes };
+          })
+          .filter(Boolean);
+
+        if (!clickables.length) return null;
+        clickables.sort((a, b) => a.minutes - b.minutes);
+        const pick = clickables[0];
+        pick.element.scrollIntoView({ block: "center", inline: "nearest" });
+        pick.element.click();
+        return pick.text;
+      })
+      .catch(() => null);
+  }
 
   if (result) {
     status("SLOT", `Selected earliest time slot ${result}`);
@@ -1035,6 +1234,105 @@ async function clickEarliestTimeSlot(page) {
   }
 
   return false;
+}
+
+async function clickBookPostAppointmentButton(page) {
+  const bookingBlock = getBookingBlockLocator(page);
+  let result = await bookingBlock
+    .evaluate((root) => {
+      const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          rect.width > 0 &&
+          rect.height > 0
+        );
+      };
+
+      const buttons = Array.from(
+        root.querySelectorAll("button, a, [role='button']"),
+      )
+        .map((element) => ({
+          element,
+          text: String(element.textContent || "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .toUpperCase(),
+        }))
+        .filter(
+          ({ element, text }) =>
+            isVisible(element) &&
+            text &&
+            element.getAttribute("aria-disabled") !== "true" &&
+            !element.disabled,
+        );
+
+      const pick = buttons.find(({ text }) =>
+        /BOOK\s+POST\s+APPOINTMENT/i.test(text),
+      );
+      if (!pick) return null;
+
+      pick.element.scrollIntoView({ block: "center", inline: "nearest" });
+      pick.element.click();
+      return pick.text;
+    })
+    .catch(() => null);
+
+  if (!result) {
+    // Fallback: book button can also render outside the booking block.
+    result = await page
+      .evaluate(() => {
+        const isVisible = (element) => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            rect.width > 0 &&
+            rect.height > 0
+          );
+        };
+
+        const buttons = Array.from(
+          document.querySelectorAll("button, a, [role='button']"),
+        )
+          .map((element) => ({
+            element,
+            text: String(element.textContent || "")
+              .replace(/\s+/g, " ")
+              .trim()
+              .toUpperCase(),
+          }))
+          .filter(
+            ({ element, text }) =>
+              isVisible(element) &&
+              text &&
+              element.getAttribute("aria-disabled") !== "true" &&
+              !element.disabled,
+          );
+
+        const pick = buttons.find(({ text }) =>
+          /BOOK\s+POST\s+APPOINTMENT/i.test(text),
+        );
+        if (!pick) return null;
+        pick.element.scrollIntoView({ block: "center", inline: "nearest" });
+        pick.element.click();
+        return pick.text;
+      })
+      .catch(() => null);
+  }
+
+  if (!result) return false;
+
+  status("BOOK", `Clicked ${result}`);
+  await page
+    .locator(".ngx-spinner-overlay")
+    .first()
+    .waitFor({ state: "hidden", timeout: 20000 })
+    .catch(() => {});
+  return true;
 }
 
 async function clickProceedButton(page) {
@@ -1096,7 +1394,7 @@ async function clickProceedButton(page) {
     await page
       .locator(".ngx-spinner-overlay")
       .first()
-      .waitFor({ state: "detached", timeout: 20000 })
+      .waitFor({ state: "hidden", timeout: 20000 })
       .catch(() => {});
 
     return true;
@@ -1183,6 +1481,18 @@ async function attemptBooking(page) {
   if (!slotSelected) {
     status("SLOT", "No time slot found");
     return "date";
+  }
+
+  // Reschedule flow: immediately click BOOK POST APPOINTMENT.
+  if (CONFIG.RESCHEDULE) {
+    const booked = await clickBookPostAppointmentButton(page).catch(
+      () => false,
+    );
+    if (!booked) {
+      status("BOOK", "BOOK POST APPOINTMENT button not found/ready");
+      return "slot";
+    }
+    return "done";
   }
 
   status("PROCEED", "Waiting for proceed/select button");
