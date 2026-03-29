@@ -94,6 +94,18 @@ const CONFIG = {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Runtime throttles (per worker process)
+let lastPickupRefreshAt = 0;
+let consecutiveNoDateAttempts = 0;
+const PICKUP_REFRESH_COOLDOWN_MS = Math.max(
+  3000,
+  Number(process.env.VISA_PICKUP_REFRESH_COOLDOWN_MS) || 15000,
+);
+const PICKUP_REFRESH_AFTER_MISSES = Math.max(
+  1,
+  Number(process.env.VISA_PICKUP_REFRESH_AFTER_MISSES) || 2,
+);
+
 function parseIsoDateOnly(value) {
   if (!value || typeof value !== "string") return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
@@ -705,6 +717,19 @@ async function clickNextCalendarMonth(page) {
   return clicked;
 }
 
+async function clickPrevCalendarMonth(page) {
+  const clicked = await page.evaluate(() => {
+    const button = document.querySelector(
+      "button.mat-calendar-previous-button:not([disabled])",
+    );
+    if (!button) return false;
+    button.click();
+    return true;
+  });
+
+  return clicked;
+}
+
 async function getCalendarHeaderText(page) {
   const header = page.locator(".mat-calendar-period-button").first();
   const txt = await header.textContent().catch(() => "");
@@ -745,11 +770,68 @@ async function canGoToNextCalendarMonth(page) {
   });
 }
 
+async function canGoToPrevCalendarMonth(page) {
+  return page.evaluate(() => {
+    const button = document.querySelector(
+      "button.mat-calendar-previous-button",
+    );
+    if (!button) return false;
+    return !button.disabled && button.getAttribute("aria-disabled") !== "true";
+  });
+}
+
+async function navigateCalendarToMonth(page, target, maxSteps = 24) {
+  if (!target) return true;
+
+  for (let steps = 0; steps < maxSteps; steps += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const current = await getCalendarMonthYear(page).catch(() => null);
+    if (!current) return false;
+
+    const currentKey = monthKey(current);
+    const targetKey = monthKey(target);
+    if (currentKey === targetKey) return true;
+
+    const beforeHeader = await getCalendarHeaderText(page).catch(() => "");
+
+    if (currentKey < targetKey) {
+      // eslint-disable-next-line no-await-in-loop
+      if (!(await canGoToNextCalendarMonth(page))) return false;
+      // eslint-disable-next-line no-await-in-loop
+      const moved = await clickNextCalendarMonth(page);
+      if (!moved) return false;
+      // eslint-disable-next-line no-await-in-loop
+      await waitForCalendarMonthChange(page, beforeHeader, 1600);
+    } else {
+      // eslint-disable-next-line no-await-in-loop
+      if (!(await canGoToPrevCalendarMonth(page))) return false;
+      // eslint-disable-next-line no-await-in-loop
+      const moved = await clickPrevCalendarMonth(page);
+      if (!moved) return false;
+      // eslint-disable-next-line no-await-in-loop
+      await waitForCalendarMonthChange(page, beforeHeader, 1600);
+    }
+  }
+
+  return true;
+}
+
 async function huntGreenDate(page) {
   const allowed = getAllowedDateRange();
   const maxMonthKey = allowed.max
     ? allowed.max.getUTCFullYear() * 12 + allowed.max.getUTCMonth()
     : Infinity;
+
+  // Always start scanning from the earliest allowed month (or current month if
+  // no min is set). Without this, repeated scans can drift forward and miss
+  // newly-available earlier dates.
+  const startTarget = allowed.min
+    ? {
+        year: allowed.min.getUTCFullYear(),
+        monthIndex: allowed.min.getUTCMonth(),
+      }
+    : null;
+  await navigateCalendarToMonth(page, startTarget, 24).catch(() => false);
 
   await ensureCalendarAtOrAfterAllowedMinMonth(page).catch(() => {});
 
@@ -869,6 +951,9 @@ async function refreshPickupByToggle(page) {
   const fuzzyTarget = reopenedOptions.filter({ hasText: selectedName }).first();
   if (!(await fuzzyTarget.count().catch(() => 0))) return false;
   await fuzzyTarget.click({ timeout: 5000, force: true });
+
+  // Stamp refresh time only after we successfully toggled the pickup.
+  lastPickupRefreshAt = Date.now();
   return true;
 }
 
@@ -1046,19 +1131,43 @@ async function attemptBooking(page) {
     );
   }
 
-  // If we find only out-of-range greens, or no usable green at all, refresh
-  // pickup and re-scan in both Pending and Reschedule modes.
+  // If we find only out-of-range greens, or no usable green at all, we MAY
+  // refresh pickup and re-scan. This is throttled to avoid hammering the UI.
   if (dateSelected === "OUT_OF_RANGE" || !dateSelected) {
-    ({ dateSelected, monthAttempts } = await refreshPickupAndRetryDateHunt(
-      page,
-      dateSelected === "OUT_OF_RANGE" ? "OUT_OF_RANGE" : "NO_DATE",
-    ));
+    consecutiveNoDateAttempts += 1;
+
+    const now = Date.now();
+    const sinceRefreshMs = now - lastPickupRefreshAt;
+    const cooldownOk = sinceRefreshMs >= PICKUP_REFRESH_COOLDOWN_MS;
+
+    const reason = dateSelected === "OUT_OF_RANGE" ? "OUT_OF_RANGE" : "NO_DATE";
+    const missesOk =
+      reason === "OUT_OF_RANGE" ||
+      consecutiveNoDateAttempts >= PICKUP_REFRESH_AFTER_MISSES;
+
+    if (cooldownOk && missesOk) {
+      ({ dateSelected, monthAttempts } = await refreshPickupAndRetryDateHunt(
+        page,
+        reason,
+      ));
+      consecutiveNoDateAttempts = 0;
+    } else {
+      status(
+        "PICKUP_REFRESH",
+        `Skipping pickup refresh (misses=${consecutiveNoDateAttempts}/${PICKUP_REFRESH_AFTER_MISSES}, cooldown=${Math.max(0, PICKUP_REFRESH_COOLDOWN_MS - sinceRefreshMs)}ms)`,
+      );
+    }
+  } else {
+    consecutiveNoDateAttempts = 0;
   }
 
   if (!dateSelected) {
     status("DATE", "No green date found in scanned months");
     return "idle";
   }
+
+  // We have a date; reset miss counter.
+  consecutiveNoDateAttempts = 0;
 
   status("SLOT", "Waiting for time slots to load");
   const slotsReady = await waitForTimeSlotsUiReady(page, 25000).catch(
