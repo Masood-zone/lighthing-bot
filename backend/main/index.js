@@ -655,16 +655,174 @@ async function selectPickupPoint(page) {
 }
 
 async function ensureApplicantChecked(page) {
-  const checkbox = page.locator("input[type='checkbox']").first();
-  if (await checkbox.count().catch(() => 0)) {
-    const checked = await checkbox.isChecked().catch(() => true);
-    if (!checked) {
-      status("APPLICANT", "Checking applicant checkbox");
-      await checkbox.check({ timeout: 3000, force: true }).catch(async () => {
-        await checkbox.click({ timeout: 3000, force: true });
-      });
+  const trySelect = async () =>
+    page.evaluate(() => {
+      const normalize = (value) =>
+        String(value || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase();
+
+      const isVisible = (element) => {
+        if (!element) return false;
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          rect.width > 0 &&
+          rect.height > 0
+        );
+      };
+
+      const applicantHeading = Array.from(
+        document.querySelectorAll("h1,h2,h3,h4,h5,h6,div,span,p,th,td,label"),
+      ).find((element) =>
+        normalize(element.textContent).includes("applicant list"),
+      );
+
+      const scope =
+        applicantHeading?.closest(
+          "section,div,table,tbody,tr,.group-data-holder,.right-ofc-slot",
+        ) ||
+        applicantHeading?.parentElement ||
+        document;
+
+      const isChecked = () => {
+        if (scope.querySelector("input[type='checkbox']:checked")) return true;
+        if (scope.querySelector("[aria-checked='true']")) return true;
+        if (
+          scope.querySelector(
+            ".checked, .is-checked, .mat-checkbox-checked, .mat-mdc-checkbox-checked",
+          )
+        ) {
+          return true;
+        }
+        return Boolean(
+          scope.querySelector(
+            "span.checkbox.checked, span.checkbox.is-checked",
+          ),
+        );
+      };
+
+      const clickElement = (element) => {
+        if (!element) return false;
+
+        try {
+          element.scrollIntoView({ block: "center", inline: "nearest" });
+        } catch {
+          // ignore
+        }
+
+        try {
+          element.click();
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      const forceInputCheck = (input) => {
+        if (!input || input.tagName !== "INPUT") return false;
+        try {
+          if (input.checked) return true;
+          input.checked = true;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+          input.dispatchEvent(
+            new MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+            }),
+          );
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      const clickAssociatedLabel = (input) => {
+        const id = input?.getAttribute?.("id");
+        if (!id) return false;
+
+        const label = Array.from(document.querySelectorAll("label")).find(
+          (element) => element.getAttribute("for") === id,
+        );
+        return clickElement(label);
+      };
+
+      const candidates = Array.from(
+        scope.querySelectorAll(
+          "input[type='checkbox'][id^='styled-checkbox-'], .custom-checkbox input[type='checkbox'], .custom-checkbox span.checkbox, span.checkbox, [role='checkbox'], input[type='checkbox']",
+        ),
+      );
+
+      if (isChecked()) {
+        return true;
+      }
+
+      for (const candidate of candidates) {
+        if (candidate.tagName !== "INPUT" && !isVisible(candidate)) {
+          continue;
+        }
+
+        if (candidate.tagName === "INPUT" && candidate.checked) {
+          return true;
+        }
+
+        if (clickElement(candidate) && isChecked()) {
+          return true;
+        }
+
+        if (candidate.tagName === "INPUT") {
+          if (forceInputCheck(candidate) && isChecked()) {
+            return true;
+          }
+
+          if (clickAssociatedLabel(candidate) && isChecked()) {
+            return true;
+          }
+
+          const parentLabel = candidate.closest("label");
+          if (clickElement(parentLabel) && isChecked()) {
+            return true;
+          }
+        }
+
+        const clickableAncestor = candidate.closest(
+          "label, .custom-checkbox, span.checkbox, [role='checkbox'], td, tr, div, .group-data-holder, .right-ofc-slot",
+        );
+        if (clickableAncestor && clickableAncestor !== candidate) {
+          if (clickElement(clickableAncestor) && isChecked()) {
+            return true;
+          }
+
+          const descendantInput = clickableAncestor.querySelector(
+            "input[type='checkbox']",
+          );
+          if (forceInputCheck(descendantInput) && isChecked()) {
+            return true;
+          }
+        }
+      }
+
+      return isChecked();
+    });
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const selected = await trySelect().catch(() => false);
+    if (selected) {
+      return true;
+    }
+
+    if (attempt === 0) {
+      await page.waitForTimeout(200);
     }
   }
+
+  status("APPLICANT", "Applicant checkbox not yet confirmed; continuing");
+  return false;
 }
 
 function getBookingBlockLocator(page) {
@@ -1237,92 +1395,9 @@ async function clickEarliestTimeSlot(page) {
 }
 
 async function clickBookPostAppointmentButton(page) {
-  const bookingBlock = getBookingBlockLocator(page);
-  let result = await bookingBlock
-    .evaluate((root) => {
-      const isVisible = (element) => {
-        const style = window.getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return (
-          style.display !== "none" &&
-          style.visibility !== "hidden" &&
-          rect.width > 0 &&
-          rect.height > 0
-        );
-      };
-
-      const buttons = Array.from(
-        root.querySelectorAll("button, a, [role='button']"),
-      )
-        .map((element) => ({
-          element,
-          text: String(element.textContent || "")
-            .replace(/\s+/g, " ")
-            .trim()
-            .toUpperCase(),
-        }))
-        .filter(
-          ({ element, text }) =>
-            isVisible(element) &&
-            text &&
-            element.getAttribute("aria-disabled") !== "true" &&
-            !element.disabled,
-        );
-
-      const pick = buttons.find(({ text }) =>
-        /BOOK\s+POST\s+APPOINTMENT/i.test(text),
-      );
-      if (!pick) return null;
-
-      pick.element.scrollIntoView({ block: "center", inline: "nearest" });
-      pick.element.click();
-      return pick.text;
-    })
-    .catch(() => null);
-
-  if (!result) {
-    // Fallback: book button can also render outside the booking block.
-    result = await page
-      .evaluate(() => {
-        const isVisible = (element) => {
-          const style = window.getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return (
-            style.display !== "none" &&
-            style.visibility !== "hidden" &&
-            rect.width > 0 &&
-            rect.height > 0
-          );
-        };
-
-        const buttons = Array.from(
-          document.querySelectorAll("button, a, [role='button']"),
-        )
-          .map((element) => ({
-            element,
-            text: String(element.textContent || "")
-              .replace(/\s+/g, " ")
-              .trim()
-              .toUpperCase(),
-          }))
-          .filter(
-            ({ element, text }) =>
-              isVisible(element) &&
-              text &&
-              element.getAttribute("aria-disabled") !== "true" &&
-              !element.disabled,
-          );
-
-        const pick = buttons.find(({ text }) =>
-          /BOOK\s+POST\s+APPOINTMENT/i.test(text),
-        );
-        if (!pick) return null;
-        pick.element.scrollIntoView({ block: "center", inline: "nearest" });
-        pick.element.click();
-        return pick.text;
-      })
-      .catch(() => null);
-  }
+  const result = await clickExactActionButton(page, "BOOK POST APPOINTMENT", {
+    timeoutMs: 15000,
+  });
 
   if (!result) return false;
 
@@ -1336,55 +1411,9 @@ async function clickBookPostAppointmentButton(page) {
 }
 
 async function clickProceedButton(page) {
-  const ready = await waitForProceedActionable(page, 15000).catch(() => false);
-  if (!ready) return false;
-
-  const bookingBlock = getBookingBlockLocator(page);
-  const result = await bookingBlock.evaluate((root, reschedule) => {
-    const isVisible = (element) => {
-      const style = window.getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      return (
-        style.display !== "none" &&
-        style.visibility !== "hidden" &&
-        rect.width > 0 &&
-        rect.height > 0
-      );
-    };
-
-    const buttons = Array.from(
-      root.querySelectorAll("button, a, [role='button']"),
-    )
-      .map((element) => ({
-        element,
-        text: String(element.textContent || "")
-          .replace(/\s+/g, " ")
-          .trim()
-          .toUpperCase(),
-      }))
-      .filter(
-        ({ element, text }) =>
-          isVisible(element) &&
-          text &&
-          element.getAttribute("aria-disabled") !== "true" &&
-          !element.disabled,
-      );
-
-    const pick = buttons.find(({ text }) => {
-      if (reschedule) {
-        return /\bSELECT\b/i.test(text) || /\bPROCEED\b/i.test(text);
-      }
-      return (
-        /SELECT POST/i.test(text) || /PROCEED/i.test(text) || /BOOK/i.test(text)
-      );
-    });
-
-    if (!pick) return null;
-
-    pick.element.scrollIntoView({ block: "center", inline: "nearest" });
-    pick.element.click();
-    return pick.text;
-  }, CONFIG.RESCHEDULE);
+  const result = await clickExactActionButton(page, "SELECT POST AND PROCEED", {
+    timeoutMs: 20000,
+  });
 
   if (result) {
     status("PROCEED", `Clicked ${result}`);
@@ -1403,6 +1432,120 @@ async function clickProceedButton(page) {
   return false;
 }
 
+async function clickExactActionButton(
+  page,
+  expectedText,
+  { timeoutMs = 15000 } = {},
+) {
+  const targetText = String(expectedText || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase();
+
+  if (!targetText) return null;
+
+  const start = Date.now();
+  const beforeUrl = page.url();
+
+  while (Date.now() - start < timeoutMs) {
+    // eslint-disable-next-line no-await-in-loop
+    const clickedText = await page
+      .evaluate((target) => {
+        const normalize = (value) =>
+          String(value || "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .toUpperCase();
+
+        const isVisible = (element) => {
+          if (!element) return false;
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            rect.width > 0 &&
+            rect.height > 0
+          );
+        };
+
+        const roots = [];
+        const bookingBlock = document.querySelector(".ofc-book-slot-block");
+        if (bookingBlock) {
+          roots.push(bookingBlock);
+        }
+        roots.push(document);
+
+        const clickCandidate = (element) => {
+          if (!element) return null;
+          if (!isVisible(element)) return null;
+          if (
+            element.getAttribute("aria-disabled") === "true" ||
+            element.disabled
+          ) {
+            return null;
+          }
+
+          const text = normalize(element.textContent || "");
+          if (text !== target) return null;
+
+          try {
+            element.scrollIntoView({ block: "center", inline: "nearest" });
+          } catch {
+            // ignore
+          }
+
+          try {
+            element.click();
+            return text;
+          } catch {
+            return null;
+          }
+        };
+
+        for (const root of roots) {
+          const candidates = Array.from(
+            root.querySelectorAll("button, a, [role='button']"),
+          );
+
+          for (const candidate of candidates) {
+            const clicked = clickCandidate(candidate);
+            if (clicked) return clicked;
+          }
+        }
+
+        return null;
+      }, targetText)
+      .catch(() => null);
+
+    if (clickedText) {
+      const redirected = await waitForFinalActionRedirect(
+        page,
+        beforeUrl,
+        10000,
+      ).catch(() => false);
+      if (redirected) {
+        return clickedText;
+      }
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    await page.waitForTimeout(100);
+  }
+
+  return null;
+}
+
+async function waitForFinalActionRedirect(page, beforeUrl, timeoutMs = 10000) {
+  const previousUrl = String(beforeUrl || "");
+  if (!previousUrl) return false;
+
+  return page
+    .waitForURL((url) => url.href !== previousUrl, { timeout: timeoutMs })
+    .then(() => true)
+    .catch(() => false);
+}
+
 async function attemptBooking(page) {
   await openAppointmentMode(page);
 
@@ -1415,9 +1558,7 @@ async function attemptBooking(page) {
   }
 
   if (!CONFIG.RESCHEDULE) {
-    await ensureApplicantChecked(page);
     await selectPickupPoint(page);
-    await ensureApplicantChecked(page);
   }
 
   let { dateSelected, monthAttempts } = await huntGreenDate(page);
@@ -1483,8 +1624,12 @@ async function attemptBooking(page) {
     return "date";
   }
 
+  status("APPLICANT", "Rechecking applicant checkbox before final action");
+  await ensureApplicantChecked(page).catch(() => false);
+
   // Reschedule flow: immediately click BOOK POST APPOINTMENT.
   if (CONFIG.RESCHEDULE) {
+    status("BOOK", "Clicking BOOK POST APPOINTMENT");
     const booked = await clickBookPostAppointmentButton(page).catch(
       () => false,
     );
@@ -1495,18 +1640,10 @@ async function attemptBooking(page) {
     return "done";
   }
 
-  status("PROCEED", "Waiting for proceed/select button");
-  const proceedReady = await waitForProceedActionable(page, 20000).catch(
-    () => false,
-  );
-  if (!proceedReady) {
-    status("PROCEED", "Proceed/select button not ready");
-    return "slot";
-  }
-
+  status("PROCEED", "Clicking SELECT POST AND PROCEED");
   const proceeded = await clickProceedButton(page);
   if (!proceeded) {
-    status("PROCEED", "No actionable proceed/select button found");
+    status("PROCEED", "SELECT POST AND PROCEED button not found/ready");
     return "slot";
   }
 
@@ -1528,11 +1665,12 @@ async function main() {
       });
 
       if (result === "done") {
-        status("SUCCESS", "Fast attempt completed; continuing monitor loop");
+        status("SUCCESS", "Final action completed; exiting worker");
         if (!completionReported) {
           completionReported = true;
           status("COMPLETED", "Booking flow completed successfully");
         }
+        break;
       }
 
       await sleep(
