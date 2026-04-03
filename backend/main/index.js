@@ -654,161 +654,164 @@ async function selectPickupPoint(page) {
     .click({ timeout: 5000, force: true });
 }
 
-async function ensureApplicantChecked(page) {
-  const trySelect = async () =>
-    page.evaluate(() => {
-      const normalize = (value) =>
-        String(value || "")
-          .replace(/\s+/g, " ")
-          .trim()
-          .toLowerCase();
+async function setApplicantCheckboxState(page, desiredChecked) {
+  return page.evaluate((desiredState) => {
+    const normalize = (value) =>
+      String(value || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
 
-      const isVisible = (element) => {
-        if (!element) return false;
-        const style = window.getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return (
-          style.display !== "none" &&
-          style.visibility !== "hidden" &&
-          rect.width > 0 &&
-          rect.height > 0
-        );
-      };
-
-      const applicantHeading = Array.from(
-        document.querySelectorAll("h1,h2,h3,h4,h5,h6,div,span,p,th,td,label"),
-      ).find((element) =>
-        normalize(element.textContent).includes("applicant list"),
+    const isVisible = (element) => {
+      if (!element) return false;
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        rect.width > 0 &&
+        rect.height > 0
       );
+    };
 
-      const scope =
-        applicantHeading?.closest(
-          "section,div,table,tbody,tr,.group-data-holder,.right-ofc-slot",
-        ) ||
-        applicantHeading?.parentElement ||
-        document;
+    const applicantHeading = Array.from(
+      document.querySelectorAll("h1,h2,h3,h4,h5,h6,div,span,p,th,td,label"),
+    ).find((element) =>
+      normalize(element.textContent).includes("applicant list"),
+    );
 
-      const isChecked = () => {
-        if (scope.querySelector("input[type='checkbox']:checked")) return true;
-        if (scope.querySelector("[aria-checked='true']")) return true;
+    const scope =
+      applicantHeading?.closest(
+        "section,div,table,tbody,tr,.group-data-holder,.right-ofc-slot",
+      ) ||
+      applicantHeading?.parentElement ||
+      document;
+
+    const isChecked = () => {
+      if (scope.querySelector("input[type='checkbox']:checked")) return true;
+      if (scope.querySelector("[aria-checked='true']")) return true;
+      if (
+        scope.querySelector(
+          ".checked, .is-checked, .mat-checkbox-checked, .mat-mdc-checkbox-checked",
+        )
+      ) {
+        return true;
+      }
+      return Boolean(
+        scope.querySelector("span.checkbox.checked, span.checkbox.is-checked"),
+      );
+    };
+
+    const clickElement = (element) => {
+      if (!element) return false;
+
+      try {
+        element.scrollIntoView({ block: "center", inline: "nearest" });
+      } catch {
+        // ignore
+      }
+
+      try {
+        element.click();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const forceInputState = (input, checked) => {
+      if (!input || input.tagName !== "INPUT") return false;
+      try {
+        if (input.checked !== checked) {
+          input.click();
+        }
+
+        if (input.checked === checked) {
+          return true;
+        }
+
+        input.checked = checked;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        return input.checked === checked;
+      } catch {
+        return false;
+      }
+    };
+
+    const clickAssociatedLabel = (input) => {
+      const id = input?.getAttribute?.("id");
+      if (!id) return false;
+
+      const label = Array.from(document.querySelectorAll("label")).find(
+        (element) => element.getAttribute("for") === id,
+      );
+      return clickElement(label);
+    };
+
+    const candidates = Array.from(
+      scope.querySelectorAll(
+        "input[type='checkbox'][id^='styled-checkbox-'], .custom-checkbox input[type='checkbox'], .custom-checkbox span.checkbox, span.checkbox, [role='checkbox'], input[type='checkbox']",
+      ),
+    );
+
+    if (isChecked() === desiredState) {
+      return true;
+    }
+
+    for (const candidate of candidates) {
+      if (candidate.tagName !== "INPUT" && !isVisible(candidate)) {
+        continue;
+      }
+
+      if (candidate.tagName === "INPUT") {
         if (
-          scope.querySelector(
-            ".checked, .is-checked, .mat-checkbox-checked, .mat-mdc-checkbox-checked",
-          )
+          forceInputState(candidate, desiredState) &&
+          isChecked() === desiredState
         ) {
           return true;
         }
-        return Boolean(
-          scope.querySelector(
-            "span.checkbox.checked, span.checkbox.is-checked",
-          ),
-        );
-      };
 
-      const clickElement = (element) => {
-        if (!element) return false;
-
-        try {
-          element.scrollIntoView({ block: "center", inline: "nearest" });
-        } catch {
-          // ignore
-        }
-
-        try {
-          element.click();
+        if (clickAssociatedLabel(candidate) && isChecked() === desiredState) {
           return true;
-        } catch {
-          return false;
         }
-      };
 
-      const forceInputCheck = (input) => {
-        if (!input || input.tagName !== "INPUT") return false;
-        try {
-          if (input.checked) return true;
-          input.checked = true;
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-          input.dispatchEvent(
-            new MouseEvent("click", {
-              bubbles: true,
-              cancelable: true,
-              view: window,
-            }),
-          );
+        const parentLabel = candidate.closest("label");
+        if (clickElement(parentLabel) && isChecked() === desiredState) {
           return true;
-        } catch {
-          return false;
         }
-      };
+      }
 
-      const clickAssociatedLabel = (input) => {
-        const id = input?.getAttribute?.("id");
-        if (!id) return false;
-
-        const label = Array.from(document.querySelectorAll("label")).find(
-          (element) => element.getAttribute("for") === id,
-        );
-        return clickElement(label);
-      };
-
-      const candidates = Array.from(
-        scope.querySelectorAll(
-          "input[type='checkbox'][id^='styled-checkbox-'], .custom-checkbox input[type='checkbox'], .custom-checkbox span.checkbox, span.checkbox, [role='checkbox'], input[type='checkbox']",
-        ),
-      );
-
-      if (isChecked()) {
+      if (clickElement(candidate) && isChecked() === desiredState) {
         return true;
       }
 
-      for (const candidate of candidates) {
-        if (candidate.tagName !== "INPUT" && !isVisible(candidate)) {
-          continue;
-        }
-
-        if (candidate.tagName === "INPUT" && candidate.checked) {
+      const clickableAncestor = candidate.closest(
+        "label, .custom-checkbox, span.checkbox, [role='checkbox'], td, tr, div, .group-data-holder, .right-ofc-slot",
+      );
+      if (clickableAncestor && clickableAncestor !== candidate) {
+        if (clickElement(clickableAncestor) && isChecked() === desiredState) {
           return true;
         }
 
-        if (clickElement(candidate) && isChecked()) {
-          return true;
-        }
-
-        if (candidate.tagName === "INPUT") {
-          if (forceInputCheck(candidate) && isChecked()) {
-            return true;
-          }
-
-          if (clickAssociatedLabel(candidate) && isChecked()) {
-            return true;
-          }
-
-          const parentLabel = candidate.closest("label");
-          if (clickElement(parentLabel) && isChecked()) {
-            return true;
-          }
-        }
-
-        const clickableAncestor = candidate.closest(
-          "label, .custom-checkbox, span.checkbox, [role='checkbox'], td, tr, div, .group-data-holder, .right-ofc-slot",
+        const descendantInput = clickableAncestor.querySelector(
+          "input[type='checkbox']",
         );
-        if (clickableAncestor && clickableAncestor !== candidate) {
-          if (clickElement(clickableAncestor) && isChecked()) {
-            return true;
-          }
-
-          const descendantInput = clickableAncestor.querySelector(
-            "input[type='checkbox']",
-          );
-          if (forceInputCheck(descendantInput) && isChecked()) {
-            return true;
-          }
+        if (
+          forceInputState(descendantInput, desiredState) &&
+          isChecked() === desiredState
+        ) {
+          return true;
         }
       }
+    }
 
-      return isChecked();
-    });
+    return isChecked() === desiredState;
+  }, Boolean(desiredChecked));
+}
+
+async function ensureApplicantChecked(page) {
+  const trySelect = async () => setApplicantCheckboxState(page, true);
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const selected = await trySelect().catch(() => false);
@@ -823,6 +826,12 @@ async function ensureApplicantChecked(page) {
 
   status("APPLICANT", "Applicant checkbox not yet confirmed; continuing");
   return false;
+}
+
+async function resetApplicantCheckbox(page) {
+  await setApplicantCheckboxState(page, false).catch(() => false);
+  await page.waitForTimeout(150).catch(() => {});
+  return setApplicantCheckboxState(page, true).catch(() => false);
 }
 
 async function hasSelectApplicantToast(page) {
@@ -1677,9 +1686,9 @@ async function clickExactActionButton(
         applicantRetryUsed = true;
         status(
           "APPLICANT",
-          "Applicant toast detected; rechecking checkbox and retrying final action",
+          "Applicant toast detected; unchecking then rechecking checkbox and retrying final action",
         );
-        await ensureApplicantChecked(page).catch(() => false);
+        await resetApplicantCheckbox(page).catch(() => false);
         await page.waitForTimeout(200).catch(() => {});
         continue;
       }
