@@ -850,7 +850,7 @@ async function clickFirstGreenDate(page) {
   const minIso = allowed.min ? allowed.min.toISOString().slice(0, 10) : null;
   const maxIso = allowed.max ? allowed.max.toISOString().slice(0, 10) : null;
 
-  const clickedText = await page.evaluate(
+  const clicked = await page.evaluate(
     ({ minIsoArg, maxIsoArg }) => {
       const isGreen = (element) => {
         const style = window.getComputedStyle(element);
@@ -952,7 +952,21 @@ async function clickFirstGreenDate(page) {
       const actual = target.closest("button.mat-calendar-body-cell") || target;
       actual.scrollIntoView({ block: "center", inline: "nearest" });
       actual.click();
-      return (actual.textContent || "").trim();
+      const content = actual.querySelector(".mat-calendar-body-cell-content");
+      const dayText = String(
+        (content ? content.textContent : actual.textContent) || "",
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      const dayNum = Number(dayText);
+      if (!Number.isFinite(dayNum)) {
+        return { text: dayText || null, iso: null };
+      }
+
+      const iso = new Date(Date.UTC(baseYear, baseMonthIndex, dayNum))
+        .toISOString()
+        .slice(0, 10);
+      return { text: dayText || null, iso };
     },
     {
       minIsoArg: minIso,
@@ -960,7 +974,7 @@ async function clickFirstGreenDate(page) {
     },
   );
 
-  if (clickedText === "__OUT_OF_RANGE__") {
+  if (clicked === "__OUT_OF_RANGE__") {
     status(
       "DATE",
       `Green date(s) found but out of allowed range (${minIso || "(none)"}..${maxIso || "(none)"})`,
@@ -968,9 +982,12 @@ async function clickFirstGreenDate(page) {
     return "OUT_OF_RANGE";
   }
 
-  if (clickedText) {
-    status("DATE", `Selected green date ${clickedText}`);
-    return clickedText;
+  if (clicked?.text) {
+    if (clicked.iso) {
+      status("DATE_SELECTED", clicked.iso);
+    }
+    status("DATE", `Selected green date ${clicked.text}`);
+    return clicked.text;
   }
 
   return false;
@@ -1076,7 +1093,7 @@ async function clickNextAvailableDateAfter(page, afterDateText) {
           later.cell.closest("button.mat-calendar-body-cell") || later.cell;
         actual.scrollIntoView({ block: "center", inline: "nearest" });
         actual.click();
-        return { mode: "CLICKED", text: later.text };
+        return { mode: "CLICKED", text: later.text, iso };
       }
 
       const nextButton = document.querySelector(
@@ -1095,6 +1112,9 @@ async function clickNextAvailableDateAfter(page, afterDateText) {
   if (!outcome || outcome.mode === "NONE") return null;
 
   if (outcome.mode === "CLICKED") {
+    if (outcome.iso) {
+      status("DATE_SELECTED", outcome.iso);
+    }
     status("DATE", `Advanced to next date ${outcome.text}`);
     return outcome.text || null;
   }
@@ -1539,6 +1559,7 @@ async function clickEarliestTimeSlot(page, timeoutMs = 4000) {
   }
 
   if (result) {
+    status("SLOT_SELECTED", `Time slot selected: ${result}`);
     status("SLOT", `Selected earliest time slot ${result}`);
     return true;
   }
