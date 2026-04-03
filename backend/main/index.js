@@ -825,6 +825,13 @@ async function ensureApplicantChecked(page) {
   return false;
 }
 
+async function hasSelectApplicantToast(page) {
+  const toast = page
+    .getByText(/Select\s+(?:a|an)\s+applicant/i, { exact: false })
+    .first();
+  return toast.isVisible().catch(() => false);
+}
+
 function getBookingBlockLocator(page) {
   return page.locator(".ofc-book-slot-block").first();
 }
@@ -954,10 +961,146 @@ async function clickFirstGreenDate(page) {
 
   if (clickedText) {
     status("DATE", `Selected green date ${clickedText}`);
-    return true;
+    return clickedText;
   }
 
   return false;
+}
+
+async function clickNextAvailableDateAfter(page, afterDateText) {
+  const afterDay = Number(String(afterDateText || "").match(/\d{1,2}/)?.[0]);
+  if (!Number.isFinite(afterDay)) return null;
+
+  const allowed = getAllowedDateRange();
+  const minIso = allowed.min ? allowed.min.toISOString().slice(0, 10) : null;
+  const maxIso = allowed.max ? allowed.max.toISOString().slice(0, 10) : null;
+
+  const outcome = await page.evaluate(
+    ({ afterDayArg, minIsoArg, maxIsoArg }) => {
+      const isGreen = (element) => {
+        const style = window.getComputedStyle(element);
+        return (
+          /20,\s*163,\s*139/.test(style.backgroundColor) ||
+          /#14a38b/i.test(style.backgroundColor)
+        );
+      };
+
+      const parseHeaderMonthYear = () => {
+        const btn = document.querySelector(".mat-calendar-period-button");
+        const headerText = String(btn ? btn.textContent || "" : "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toUpperCase();
+        const m = headerText.match(
+          /\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b\s+(\d{4})/,
+        );
+        if (!m) return null;
+        const months = {
+          JAN: 0,
+          FEB: 1,
+          MAR: 2,
+          APR: 3,
+          MAY: 4,
+          JUN: 5,
+          JUL: 6,
+          AUG: 7,
+          SEP: 8,
+          OCT: 9,
+          NOV: 10,
+          DEC: 11,
+        };
+        const monthIndex = months[m[1]];
+        const year = Number(m[2]);
+        if (!Number.isFinite(year) || monthIndex == null) return null;
+        return { year, monthIndex };
+      };
+
+      const isWithinIsoRange = (iso) => {
+        if (!iso) return false;
+        if (minIsoArg && iso < minIsoArg) return false;
+        if (maxIsoArg && iso > maxIsoArg) return false;
+        return true;
+      };
+
+      const candidates = Array.from(
+        document.querySelectorAll(
+          "button.mat-calendar-body-cell:not(.mat-calendar-body-disabled), td.mat-calendar-body-cell:not(.mat-calendar-body-disabled)",
+        ),
+      );
+
+      const header = parseHeaderMonthYear();
+      if (!header) return { mode: "NONE" };
+
+      const later = candidates
+        .map((cell) => {
+          const inner =
+            cell.querySelector(".mat-calendar-body-cell-content") || cell;
+          if (!(isGreen(inner) || isGreen(cell))) return null;
+
+          const content = cell.querySelector(".mat-calendar-body-cell-content");
+          const dayText = String(
+            (content ? content.textContent : cell.textContent) || "",
+          )
+            .replace(/\s+/g, " ")
+            .trim();
+          const dayNum = Number(dayText);
+          if (
+            !Number.isFinite(dayNum) ||
+            dayNum <= afterDayArg ||
+            dayNum > 31
+          ) {
+            return null;
+          }
+
+          const iso = new Date(Date.UTC(header.year, header.monthIndex, dayNum))
+            .toISOString()
+            .slice(0, 10);
+          if (!isWithinIsoRange(iso)) return null;
+
+          return { cell, dayNum, text: dayText };
+        })
+        .filter(Boolean)
+        .sort((left, right) => left.dayNum - right.dayNum)[0];
+
+      if (later) {
+        const actual =
+          later.cell.closest("button.mat-calendar-body-cell") || later.cell;
+        actual.scrollIntoView({ block: "center", inline: "nearest" });
+        actual.click();
+        return { mode: "CLICKED", text: later.text };
+      }
+
+      const nextButton = document.querySelector(
+        "button.mat-calendar-next-button:not([disabled])",
+      );
+      if (nextButton) {
+        nextButton.click();
+        return { mode: "NEXT_MONTH" };
+      }
+
+      return { mode: "NONE" };
+    },
+    { afterDayArg: afterDay, minIsoArg: minIso, maxIsoArg: maxIso },
+  );
+
+  if (!outcome || outcome.mode === "NONE") return null;
+
+  if (outcome.mode === "CLICKED") {
+    status("DATE", `Advanced to next date ${outcome.text}`);
+    return outcome.text || null;
+  }
+
+  if (outcome.mode === "NEXT_MONTH") {
+    const beforeHeader = await getCalendarHeaderText(page).catch(() => "");
+    await waitForCalendarMonthChange(page, beforeHeader, 1600).catch(() => {});
+    const clickedText = await clickFirstGreenDate(page);
+    if (clickedText && clickedText !== "OUT_OF_RANGE") {
+      status("DATE", `Advanced to next month date ${clickedText}`);
+      return clickedText;
+    }
+  }
+
+  return null;
 }
 
 async function clickNextCalendarMonth(page) {
@@ -1244,9 +1387,9 @@ async function refreshPickupAndRetryDateHunt(page, reason) {
   return { refreshed: true, dateSelected, monthAttempts };
 }
 
-async function clickEarliestTimeSlot(page) {
+async function clickEarliestTimeSlot(page, timeoutMs = 4000) {
   // Do a short wait for slots to populate so we don't prematurely return "No time slot".
-  await waitForTimeSlotsUiReady(page, 15000).catch(() => false);
+  await waitForTimeSlotsUiReady(page, timeoutMs).catch(() => false);
 
   const bookingBlock = getBookingBlockLocator(page);
   let result = await bookingBlock.evaluate((root) => {
@@ -1446,6 +1589,7 @@ async function clickExactActionButton(
 
   const start = Date.now();
   const beforeUrl = page.url();
+  let applicantRetryUsed = false;
 
   while (Date.now() - start < timeoutMs) {
     // eslint-disable-next-line no-await-in-loop
@@ -1519,13 +1663,25 @@ async function clickExactActionButton(
       .catch(() => null);
 
     if (clickedText) {
-      const redirected = await waitForFinalActionRedirect(
+      const outcome = await waitForFinalActionOutcome(
         page,
         beforeUrl,
-        10000,
-      ).catch(() => false);
-      if (redirected) {
+        Math.min(4000, Math.max(1000, timeoutMs - (Date.now() - start))),
+      ).catch(() => null);
+
+      if (outcome === "redirect") {
         return clickedText;
+      }
+
+      if (outcome === "toast" && !applicantRetryUsed) {
+        applicantRetryUsed = true;
+        status(
+          "APPLICANT",
+          "Applicant toast detected; rechecking checkbox and retrying final action",
+        );
+        await ensureApplicantChecked(page).catch(() => false);
+        await page.waitForTimeout(200).catch(() => {});
+        continue;
       }
     }
 
@@ -1536,14 +1692,32 @@ async function clickExactActionButton(
   return null;
 }
 
-async function waitForFinalActionRedirect(page, beforeUrl, timeoutMs = 10000) {
+async function waitForFinalActionOutcome(page, beforeUrl, timeoutMs = 10000) {
   const previousUrl = String(beforeUrl || "");
   if (!previousUrl) return false;
 
-  return page
-    .waitForURL((url) => url.href !== previousUrl, { timeout: timeoutMs })
-    .then(() => true)
-    .catch(() => false);
+  const slotPagePattern = /\/home\/appointment\/slot(?:[/?#]|$)/i;
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const currentUrl = page.url();
+    if (
+      currentUrl &&
+      currentUrl !== previousUrl &&
+      !slotPagePattern.test(currentUrl)
+    ) {
+      return "redirect";
+    }
+
+    if (await hasSelectApplicantToast(page).catch(() => false)) {
+      return "toast";
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    await page.waitForTimeout(100);
+  }
+
+  return null;
 }
 
 async function attemptBooking(page) {
@@ -1608,19 +1782,46 @@ async function attemptBooking(page) {
   // We have a date; reset miss counter.
   consecutiveNoDateAttempts = 0;
 
-  status("SLOT", "Waiting for time slots to load");
-  const slotsReady = await waitForTimeSlotsUiReady(page, 25000).catch(
-    () => false,
-  );
-  if (!slotsReady) {
-    status("SLOT", "Time slots did not load in time");
-    return "date";
+  let activeDate = dateSelected;
+  let slotSelected = false;
+  const slotRetryLimit = 6;
+
+  for (let retry = 0; retry < slotRetryLimit; retry += 1) {
+    status("SLOT", `Waiting for time slots to load for date ${activeDate}`);
+    const slotsReady = await waitForTimeSlotsUiReady(page, 3000).catch(
+      () => false,
+    );
+    if (!slotsReady) {
+      status(
+        "SLOT",
+        `No slot appeared for date ${activeDate}; moving to next date`,
+      );
+    } else {
+      // Keep the time selection fast: choose the earliest visible slot only.
+      slotSelected = await clickEarliestTimeSlot(page, 2000);
+      if (slotSelected) {
+        break;
+      }
+
+      status(
+        "SLOT",
+        `No time slot found for date ${activeDate}; moving to next date`,
+      );
+    }
+
+    const nextDate = await clickNextAvailableDateAfter(page, activeDate).catch(
+      () => null,
+    );
+    if (!nextDate) {
+      status("DATE", "No later date available to continue hunting");
+      return "idle";
+    }
+
+    activeDate = nextDate;
   }
 
-  // Keep the time selection fast: choose the earliest visible slot only.
-  const slotSelected = await clickEarliestTimeSlot(page);
   if (!slotSelected) {
-    status("SLOT", "No time slot found");
+    status("SLOT", "No time slot found after advancing dates");
     return "date";
   }
 
