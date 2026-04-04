@@ -56,7 +56,7 @@ if errorlevel 1 goto :fail
 call :ensure_origin
 if errorlevel 1 goto :fail
 
-call :ensure_clean_worktree
+call :checkpoint_worktree
 if errorlevel 1 goto :fail
 
 for /f "delims=" %%B in ('git branch --show-current 2^>nul') do set "CURRENT_BRANCH=%%B"
@@ -80,7 +80,8 @@ if /i not "!CURRENT_BRANCH!"=="main" (
 )
 
 echo Pulling latest changes from origin/main...
-git pull --ff-only origin main
+set "PULL_USED_REBASE=1"
+git pull --rebase origin main
 if errorlevel 1 goto :restore_then_fail
 
 for /f "delims=" %%L in ('git log -1 --oneline 2^>nul') do set "LATEST_COMMIT=%%L"
@@ -112,6 +113,9 @@ exit /b 0
 
 :restore_then_fail
 echo.
+if defined PULL_USED_REBASE (
+  git rebase --abort >nul 2>nul
+)
 if defined SWITCHED_TO_MAIN (
   echo Attempting to return to !ORIGINAL_BRANCH!...
   git checkout "!ORIGINAL_BRANCH!" >nul 2>nul
@@ -196,17 +200,29 @@ echo   !ORIGIN_URL!
 echo.
 exit /b 0
 
-:ensure_clean_worktree
+:checkpoint_worktree
 echo Checking working tree...
 git status --porcelain --untracked-files=all | findstr . >nul
-if not errorlevel 1 (
-  echo ERROR: Repository has local changes or untracked files.
-  echo Commit, stash, or clean the working tree before running this script.
+if errorlevel 1 (
+  echo Working tree is clean.
   echo.
-  git status --short
+  exit /b 0
+)
+
+echo Local changes detected. Creating a checkpoint commit...
+git add -A
+git commit -m "chore: checkpoint local changes before pulling main"
+if errorlevel 1 (
+  echo ERROR: Could not create the checkpoint commit.
+  echo Review the Git output above and try again.
   exit /b 1
 )
 
-echo Working tree is clean.
+for /f "delims=" %%C in ('git log -1 --oneline 2^>nul') do set "AUTO_COMMIT=%%C"
+if defined AUTO_COMMIT (
+  echo Checkpoint commit created:
+  echo   !AUTO_COMMIT!
+)
+
 echo.
 exit /b 0
