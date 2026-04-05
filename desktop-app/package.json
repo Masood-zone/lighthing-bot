@@ -1,6 +1,6 @@
 {
   "name": "lighthingbot-app",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "A fast and efficient desktop version of the LightningBot application.",
   "main": "./out/main/index.js",
   "author": "https://lighthingbot.vercel.app",
@@ -72,7 +72,6 @@
     "react-hook-form": "^7.71.1",
     "react-router-dom": "^7.12.0",
     "recharts": "^2.15.4",
-    "selenium-webdriver": "^4.40.0",
     "side-channel": "^1.1.0",
     "sonner": "^2.0.7",
     "side-channel-list": "^1.0.0",

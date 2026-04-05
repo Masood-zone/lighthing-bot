@@ -204,6 +204,8 @@ export async function startEmbeddedBackend(): Promise<{ port: number; apiUrl: st
     ELECTRON_RUN_AS_NODE: '1',
     PORT: String(port),
     HOST: '127.0.0.1',
+    DEFAULT_HEADLESS: app.isPackaged ? '0' : process.env.DEFAULT_HEADLESS,
+    FORCE_VISIBLE_BROWSER: app.isPackaged ? '1' : process.env.FORCE_VISIBLE_BROWSER,
     VISA_DATA_DIR: dataDir,
     VISA_PROFILES_DIR: profilesDir,
     NODE_ENV: app.isPackaged ? 'production' : process.env.NODE_ENV || 'development'
