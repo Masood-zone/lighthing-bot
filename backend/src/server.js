@@ -42,7 +42,17 @@ const PROFILES_DIR = resolveDirFromEnv(
   "VISA_PROFILES_DIR",
   path.join(BASE_DIR, "profiles"),
 );
-const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT ?? 2);
+
+function parseMaxConcurrent(value, fallback) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+const MAX_CONCURRENT = parseMaxConcurrent(process.env.MAX_CONCURRENT, 3);
 
 const app = express();
 app.use(cors());

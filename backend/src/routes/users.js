@@ -161,7 +161,9 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
     } = req.body || {};
 
     const defaultHeadless =
-      readBoolEnv("DEFAULT_HEADLESS") ?? process.env.NODE_ENV === "production";
+      readBoolEnv("DEFAULT_HEADLESS") ??
+      readBoolEnv("HEADLESS_BROWSER") ??
+      process.env.NODE_ENV === "production";
     const headlessEffective =
       typeof headless === "boolean" ? headless : defaultHeadless;
 
