@@ -89,6 +89,10 @@ const CONFIG = {
     60_000,
     Number(process.env.VISA_LOGIN_WAIT_TIMEOUT_MS) || 15 * 60 * 1000,
   ),
+  LOGIN_NAV_TIMEOUT_MS: Math.max(
+    120_000,
+    Number(process.env.VISA_LOGIN_NAV_TIMEOUT_MS) || 3 * 60 * 1000,
+  ),
   PROFILE_DIR: process.env.VISA_PROFILE_DIR || "",
 };
 
@@ -211,17 +215,64 @@ async function launchBrowser() {
       CONFIG.PROFILE_DIR,
       launchOptions,
     );
+    const page = context.pages()[0] || (await context.newPage());
+    page.setDefaultTimeout(15000);
+    page.setDefaultNavigationTimeout(CONFIG.LOGIN_NAV_TIMEOUT_MS);
     return {
       browser: null,
       context,
-      page: context.pages()[0] || (await context.newPage()),
+      page,
     };
   }
 
   const browser = await chromium.launch(launchOptions);
   const context = await browser.newContext({ viewport: null });
   const page = await context.newPage();
+  page.setDefaultTimeout(15000);
+  page.setDefaultNavigationTimeout(CONFIG.LOGIN_NAV_TIMEOUT_MS);
   return { browser, context, page };
+}
+
+async function waitForLoginSurface(
+  page,
+  timeoutMs = CONFIG.LOGIN_WAIT_TIMEOUT_MS,
+) {
+  if (/dashboard/i.test(page.url())) {
+    return "dashboard";
+  }
+
+  const usernameWait = page
+    .locator('input[formcontrolname="username"]')
+    .first()
+    .waitFor({ state: "visible", timeout: timeoutMs })
+    .then(() => "login")
+    .catch(() => null);
+
+  const passwordWait = page
+    .locator('input[formcontrolname="password"]')
+    .first()
+    .waitFor({ state: "visible", timeout: timeoutMs })
+    .then(() => "login")
+    .catch(() => null);
+
+  const dashboardWait = page
+    .waitForURL(/dashboard/i, { timeout: timeoutMs })
+    .then(() => "dashboard")
+    .catch(() => null);
+
+  const displayNameWait = page
+    .getByText(CONFIG.USER_DISPLAY_NAME, { exact: false })
+    .first()
+    .waitFor({ state: "visible", timeout: timeoutMs })
+    .then(() => "dashboard")
+    .catch(() => null);
+
+  return Promise.race([
+    usernameWait,
+    passwordWait,
+    dashboardWait,
+    displayNameWait,
+  ]);
 }
 
 async function waitForLoginOrDashboard(
@@ -249,15 +300,39 @@ async function waitForLoginOrDashboard(
 }
 
 async function login(page) {
-  status("LOGIN", "Waiting for login form");
-  await page.goto(CONFIG.PLATFORM_URL, { waitUntil: "domcontentloaded" });
+  status(
+    "LOGIN",
+    `Opening login page with a relaxed timeout (${Math.round(CONFIG.LOGIN_NAV_TIMEOUT_MS / 1000)}s)`,
+  );
+
+  try {
+    await page.goto(CONFIG.PLATFORM_URL, {
+      waitUntil: "commit",
+      timeout: CONFIG.LOGIN_NAV_TIMEOUT_MS,
+    });
+  } catch (error) {
+    status(
+      "LOGIN",
+      `Login page is loading slowly; keeping the worker alive and waiting (${String(error?.message || error)})`,
+    );
+  }
+
+  const surface = await waitForLoginSurface(page);
+  if (surface === "dashboard") {
+    status("DASHBOARD", "Dashboard detected");
+    return;
+  }
+
+  if (surface !== "login") {
+    throw new Error("Login page did not become ready.");
+  }
 
   await page
     .locator('input[formcontrolname="username"]')
-    .fill(CONFIG.USER_EMAIL, { timeout: 15000 });
+    .fill(CONFIG.USER_EMAIL, { timeout: 30000 });
   await page
     .locator('input[formcontrolname="password"]')
-    .fill(CONFIG.USER_PASSWORD, { timeout: 15000 });
+    .fill(CONFIG.USER_PASSWORD, { timeout: 30000 });
 
   status("WAITING_CAPTCHA", "Credentials filled; complete CAPTCHA and sign in");
   await waitForLoginOrDashboard(page);
@@ -993,6 +1068,30 @@ async function clickFirstGreenDate(page) {
   return false;
 }
 
+async function scanVisibleMonthForGreenDate(page, maxScans = 2) {
+  let outOfRangeFound = false;
+
+  for (let scan = 0; scan < maxScans; scan += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const clickedText = await clickFirstGreenDate(page);
+    if (clickedText && clickedText !== "OUT_OF_RANGE") {
+      return { dateSelected: clickedText, outOfRangeFound };
+    }
+
+    if (clickedText === "OUT_OF_RANGE") {
+      outOfRangeFound = true;
+    }
+
+    if (scan < maxScans - 1) {
+      // Keep the scan fast, but give the calendar a moment to finish repainting.
+      // eslint-disable-next-line no-await-in-loop
+      await page.waitForTimeout(180).catch(() => {});
+    }
+  }
+
+  return { dateSelected: null, outOfRangeFound };
+}
+
 async function clickNextAvailableDateAfter(page, afterDateText) {
   const afterDay = Number(String(afterDateText || "").match(/\d{1,2}/)?.[0]);
   if (!Number.isFinite(afterDay)) return null;
@@ -1093,7 +1192,7 @@ async function clickNextAvailableDateAfter(page, afterDateText) {
           later.cell.closest("button.mat-calendar-body-cell") || later.cell;
         actual.scrollIntoView({ block: "center", inline: "nearest" });
         actual.click();
-        return { mode: "CLICKED", text: later.text, iso };
+        return { mode: "CLICKED", text: later.text, iso: later.iso };
       }
 
       const nextButton = document.querySelector(
@@ -1263,16 +1362,36 @@ async function huntGreenDate(page) {
 
   await ensureCalendarAtOrAfterAllowedMinMonth(page).catch(() => {});
 
-  let dateSelected = await clickFirstGreenDate(page);
+  let dateSelected = null;
+  let outOfRangeFound = false;
   let monthAttempts = 0;
+  let monthScans = 0;
+  const maxScansPerMonth = 2;
 
-  while (
-    !dateSelected &&
-    monthAttempts < CONFIG.MAX_MONTHS - 1 &&
-    (await canGoToNextCalendarMonth(page))
-  ) {
+  while (monthScans < CONFIG.MAX_MONTHS) {
+    monthScans += 1;
     const currentHeader = await getCalendarMonthYear(page).catch(() => null);
+    if (currentHeader && monthKey(currentHeader) > maxMonthKey) {
+      break;
+    }
+
+    const {
+      dateSelected: monthDateSelected,
+      outOfRangeFound: monthOutOfRange,
+    } = await scanVisibleMonthForGreenDate(page, maxScansPerMonth);
+    if (monthOutOfRange) {
+      outOfRangeFound = true;
+    }
+    if (monthDateSelected) {
+      dateSelected = monthDateSelected;
+      break;
+    }
+
     if (currentHeader && monthKey(currentHeader) >= maxMonthKey) {
+      break;
+    }
+
+    if (!(await canGoToNextCalendarMonth(page))) {
       break;
     }
 
@@ -1281,10 +1400,13 @@ async function huntGreenDate(page) {
     if (!moved) break;
     monthAttempts += 1;
     await waitForCalendarMonthChange(page, beforeHeader, 1600);
-    dateSelected = await clickFirstGreenDate(page);
   }
 
-  return { dateSelected, monthAttempts };
+  return {
+    dateSelected: dateSelected || (outOfRangeFound ? "OUT_OF_RANGE" : null),
+    monthAttempts,
+    outOfRangeFound,
+  };
 }
 
 async function refreshPickupByToggle(page) {
@@ -1403,6 +1525,7 @@ async function refreshPickupAndRetryDateHunt(page, reason) {
 
   // After changing pickup, wait for the calendar to refresh before scanning again.
   await waitForCalendarUiReady(page, 45000).catch(() => false);
+  await page.waitForTimeout(180).catch(() => {});
 
   status("PICKUP_REFRESH", "Pickup refreshed; running a second fast date hunt");
   const { dateSelected, monthAttempts } = await huntGreenDate(page);
@@ -1760,6 +1883,8 @@ async function attemptBooking(page) {
     status("CALENDAR", "Calendar not ready yet; skipping scan this loop");
     return "idle";
   }
+
+  await page.waitForTimeout(120).catch(() => {});
 
   if (!CONFIG.RESCHEDULE) {
     await selectPickupPoint(page);
