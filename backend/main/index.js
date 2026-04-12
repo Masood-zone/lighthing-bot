@@ -148,6 +148,18 @@ function addMonthsToMonthYear(monthYear, months) {
   };
 }
 
+function getNextTraversalMonthTarget(page) {
+  if (calendarResumeTarget) {
+    return Promise.resolve(calendarResumeTarget);
+  }
+
+  return getCalendarMonthYear(page)
+    .then((currentMonth) =>
+      currentMonth ? addMonthsToMonthYear(currentMonth, 1) : null,
+    )
+    .catch(() => null);
+}
+
 function formatMonthYear(monthYear) {
   if (!monthYear) return "(unknown)";
   return `${monthYear.year}-${String(monthYear.monthIndex + 1).padStart(2, "0")}`;
@@ -2022,10 +2034,7 @@ async function attemptBooking(page) {
       );
     }
 
-    const currentMonth = await getCalendarMonthYear(page).catch(() => null);
-    const nextMonthTarget = currentMonth
-      ? addMonthsToMonthYear(currentMonth, 1)
-      : null;
+    const nextMonthTarget = await getNextTraversalMonthTarget(page);
 
     if (!nextMonthTarget) {
       status("DATE", "No later month available to continue hunting");
