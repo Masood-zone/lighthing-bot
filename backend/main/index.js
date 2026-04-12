@@ -101,6 +101,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Runtime throttles (per worker process)
 let lastPickupRefreshAt = 0;
 let consecutiveNoDateAttempts = 0;
+let calendarResumeTarget = null;
 const PICKUP_REFRESH_COOLDOWN_MS = Math.max(
   3000,
   Number(process.env.VISA_PICKUP_REFRESH_COOLDOWN_MS) || 15000,
@@ -136,6 +137,20 @@ function endOfDayUtc(date) {
       999,
     ),
   );
+}
+
+function addMonthsToMonthYear(monthYear, months) {
+  if (!monthYear) return null;
+  const totalMonths = monthYear.year * 12 + monthYear.monthIndex + months;
+  return {
+    year: Math.floor(totalMonths / 12),
+    monthIndex: ((totalMonths % 12) + 12) % 12,
+  };
+}
+
+function formatMonthYear(monthYear) {
+  if (!monthYear) return "(unknown)";
+  return `${monthYear.year}-${String(monthYear.monthIndex + 1).padStart(2, "0")}`;
 }
 
 function getAllowedDateRange() {
@@ -1366,7 +1381,10 @@ async function navigateCalendarToMonth(page, target, maxSteps = 24) {
   return true;
 }
 
-async function huntGreenDate(page) {
+async function huntGreenDate(
+  page,
+  { startTarget: explicitStartTarget = null } = {},
+) {
   const allowed = getAllowedDateRange();
   const maxMonthKey = allowed.max
     ? allowed.max.getUTCFullYear() * 12 + allowed.max.getUTCMonth()
@@ -1375,12 +1393,20 @@ async function huntGreenDate(page) {
   // Always start scanning from the earliest allowed month (or current month if
   // no min is set). Without this, repeated scans can drift forward and miss
   // newly-available earlier dates.
-  const startTarget = allowed.min
+  const allowedMinTarget = allowed.min
     ? {
         year: allowed.min.getUTCFullYear(),
         monthIndex: allowed.min.getUTCMonth(),
       }
     : null;
+  const resumeTarget =
+    explicitStartTarget || calendarResumeTarget || allowedMinTarget;
+  const startTarget =
+    resumeTarget &&
+    allowedMinTarget &&
+    monthKey(resumeTarget) < monthKey(allowedMinTarget)
+      ? allowedMinTarget
+      : resumeTarget;
   await navigateCalendarToMonth(page, startTarget, 24).catch(() => false);
 
   await ensureCalendarAtOrAfterAllowedMinMonth(page).catch(() => {});
@@ -1391,10 +1417,11 @@ async function huntGreenDate(page) {
   let monthAttempts = 0;
   let monthScans = 0;
   const maxScansPerMonth = 2;
+  let currentHeader = null;
 
   while (monthScans < CONFIG.MAX_MONTHS) {
     monthScans += 1;
-    const currentHeader = await getCalendarMonthYear(page).catch(() => null);
+    currentHeader = await getCalendarMonthYear(page).catch(() => null);
     if (currentHeader && monthKey(currentHeader) > maxMonthKey) {
       break;
     }
@@ -1431,6 +1458,9 @@ async function huntGreenDate(page) {
     dateSelected: dateSelected || (outOfRangeFound ? "OUT_OF_RANGE" : null),
     monthAttempts,
     outOfRangeFound,
+    resumeTarget: currentHeader
+      ? addMonthsToMonthYear(currentHeader, 1)
+      : startTarget,
   };
 }
 
@@ -1553,7 +1583,9 @@ async function refreshPickupAndRetryDateHunt(page, reason) {
   await page.waitForTimeout(180).catch(() => {});
 
   status("PICKUP_REFRESH", "Pickup refreshed; running a second fast date hunt");
-  const { dateSelected, monthAttempts } = await huntGreenDate(page);
+  const { dateSelected, monthAttempts, resumeTarget } =
+    await huntGreenDate(page);
+  calendarResumeTarget = resumeTarget || calendarResumeTarget;
   if (monthAttempts > 0) {
     status(
       "CALENDAR",
@@ -1915,7 +1947,8 @@ async function attemptBooking(page) {
     await selectPickupPoint(page);
   }
 
-  let { dateSelected, monthAttempts } = await huntGreenDate(page);
+  let { dateSelected, monthAttempts, resumeTarget } = await huntGreenDate(page);
+  calendarResumeTarget = resumeTarget || calendarResumeTarget;
 
   if (monthAttempts > 0) {
     status(
@@ -1989,19 +2022,43 @@ async function attemptBooking(page) {
       );
     }
 
-    const nextDate = await clickNextAvailableDateAfter(page, activeDate).catch(
-      () => null,
-    );
-    if (!nextDate) {
-      status("DATE", "No later date available to continue hunting");
+    const currentMonth = await getCalendarMonthYear(page).catch(() => null);
+    const nextMonthTarget = currentMonth
+      ? addMonthsToMonthYear(currentMonth, 1)
+      : null;
+
+    if (!nextMonthTarget) {
+      status("DATE", "No later month available to continue hunting");
       return "idle";
     }
 
-    activeDate = nextDate;
+    calendarResumeTarget = nextMonthTarget;
+    status(
+      "DATE",
+      `No slot for ${activeDate}; advancing to next month ${formatMonthYear(nextMonthTarget)}`,
+    );
+
+    const nextMonthScan = await huntGreenDate(page, {
+      startTarget: nextMonthTarget,
+    }).catch(() => ({
+      dateSelected: null,
+      monthAttempts: 0,
+      resumeTarget: nextMonthTarget,
+    }));
+
+    calendarResumeTarget = nextMonthScan.resumeTarget || nextMonthTarget;
+
+    if (!nextMonthScan.dateSelected) {
+      status("DATE", "No usable date found in later months");
+      return "idle";
+    }
+
+    activeDate = nextMonthScan.dateSelected;
   }
 
   if (!slotSelected) {
     status("SLOT", "No time slot found after advancing dates");
+    calendarResumeTarget = calendarResumeTarget || null;
     return "date";
   }
 
@@ -2018,6 +2075,7 @@ async function attemptBooking(page) {
       status("BOOK", "BOOK POST APPOINTMENT button not found/ready");
       return "slot";
     }
+    calendarResumeTarget = null;
     return "done";
   }
 
@@ -2028,6 +2086,7 @@ async function attemptBooking(page) {
     return "slot";
   }
 
+  calendarResumeTarget = null;
   return "done";
 }
 
