@@ -469,6 +469,29 @@ async function waitForCalendarUiReady(page, timeoutMs = 45000) {
   return true;
 }
 
+async function waitForCalendarMonthDatesReady(page, timeoutMs = 2000) {
+  const bookingBlock = getBookingBlockLocator(page);
+  try {
+    await bookingBlock.waitFor({ state: "visible", timeout: timeoutMs });
+  } catch {
+    return false;
+  }
+
+  try {
+    await page
+      .locator(
+        "button.mat-calendar-body-cell, td.mat-calendar-body-cell, .mat-calendar-body-cell-content",
+      )
+      .first()
+      .waitFor({ state: "visible", timeout: timeoutMs });
+  } catch {
+    return false;
+  }
+
+  await page.waitForTimeout(120).catch(() => {});
+  return true;
+}
+
 async function waitForTimeSlotsUiReady(page, timeoutMs = 20000) {
   const bookingBlock = getBookingBlockLocator(page);
   try {
@@ -1361,6 +1384,7 @@ async function huntGreenDate(page) {
   await navigateCalendarToMonth(page, startTarget, 24).catch(() => false);
 
   await ensureCalendarAtOrAfterAllowedMinMonth(page).catch(() => {});
+  await waitForCalendarMonthDatesReady(page, 2000).catch(() => {});
 
   let dateSelected = null;
   let outOfRangeFound = false;
@@ -1400,6 +1424,7 @@ async function huntGreenDate(page) {
     if (!moved) break;
     monthAttempts += 1;
     await waitForCalendarMonthChange(page, beforeHeader, 1600);
+    await waitForCalendarMonthDatesReady(page, 2000).catch(() => {});
   }
 
   return {
