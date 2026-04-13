@@ -40,29 +40,6 @@ async function getCalendarMonthYear(page) {
   return { monthIndex, year };
 }
 
-async function ensureCalendarAtOrAfterAllowedMinMonth(page) {
-  const allowed = getAllowedDateRange();
-  if (!allowed.min) return true;
-
-  const target = {
-    year: allowed.min.getUTCFullYear(),
-    monthIndex: allowed.min.getUTCMonth(),
-  };
-
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    const current = await getCalendarMonthYear(page).catch(() => null);
-    if (!current) return false;
-    if (monthKey(current) >= monthKey(target)) return true;
-
-    const beforeHeader = await getCalendarHeaderText(page).catch(() => "");
-    const moved = await clickNextCalendarMonth(page).catch(() => false);
-    if (!moved) return false;
-    await waitForCalendarMonthChange(page, beforeHeader, 1200).catch(() => {});
-  }
-
-  return true;
-}
-
 const CONFIG = {
   PLATFORM_URL:
     process.env.VISA_PLATFORM_URL ||
@@ -492,7 +469,7 @@ async function waitForCalendarUiReady(page, timeoutMs = 45000) {
   }
 
   // Tiny settle so computed styles are stable (used by the green-date detector).
-  await page.waitForTimeout(150);
+  await page.waitForTimeout(75);
   return true;
 }
 
@@ -515,7 +492,7 @@ async function waitForCalendarMonthDatesReady(page, timeoutMs = 2000) {
     return false;
   }
 
-  await page.waitForTimeout(120).catch(() => {});
+  await page.waitForTimeout(60).catch(() => {});
   return true;
 }
 
@@ -570,7 +547,7 @@ async function waitForTimeSlotsUiReady(page, timeoutMs = 20000) {
     }
 
     // eslint-disable-next-line no-await-in-loop
-    await page.waitForTimeout(250);
+    await page.waitForTimeout(150);
   }
 
   return false;
@@ -1420,8 +1397,6 @@ async function huntGreenDate(
       ? allowedMinTarget
       : resumeTarget;
   await navigateCalendarToMonth(page, startTarget, 24).catch(() => false);
-
-  await ensureCalendarAtOrAfterAllowedMinMonth(page).catch(() => {});
   await waitForCalendarMonthDatesReady(page, 2000).catch(() => {});
 
   let dateSelected = null;
@@ -1902,7 +1877,6 @@ async function clickExactActionButton(
           "Applicant toast detected; unchecking then rechecking checkbox and retrying final action",
         );
         await resetApplicantCheckbox(page).catch(() => false);
-        await page.waitForTimeout(200).catch(() => {});
         continue;
       }
     }
