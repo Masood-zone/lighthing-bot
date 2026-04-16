@@ -936,6 +936,11 @@ async function resetApplicantCheckbox(page) {
   return setApplicantCheckboxState(page, true).catch(() => false);
 }
 
+async function pulseApplicantCheckbox(page) {
+  await setApplicantCheckboxState(page, false).catch(() => false);
+  return setApplicantCheckboxState(page, true).catch(() => false);
+}
+
 async function hasSelectApplicantToast(page) {
   const toast = page
     .getByText(/Select\s+(?:a|an)\s+applicant/i, { exact: false })
@@ -1786,11 +1791,14 @@ async function clickExactActionButton(
 
   const start = Date.now();
   const beforeUrl = page.url();
-  let applicantRetryUsed = false;
+  const isPendingProceedAction =
+    !CONFIG.RESCHEDULE && targetText === "SELECT POST AND PROCEED";
+  const effectiveTimeoutMs = isPendingProceedAction
+    ? Math.max(timeoutMs, 45000)
+    : timeoutMs;
 
-  while (Date.now() - start < timeoutMs) {
-    // eslint-disable-next-line no-await-in-loop
-    const clickedText = await page
+  const clickTargetOnce = async () =>
+    page
       .evaluate((target) => {
         const normalize = (value) =>
           String(value || "")
@@ -1859,24 +1867,69 @@ async function clickExactActionButton(
       }, targetText)
       .catch(() => null);
 
+  const burstPendingProceedAction = async (remainingTimeoutMs) => {
+    const burstStart = Date.now();
+    const burstTimeoutMs = Math.max(1000, remainingTimeoutMs);
+
+    while (Date.now() - burstStart < burstTimeoutMs) {
+      // eslint-disable-next-line no-await-in-loop
+      await pulseApplicantCheckbox(page).catch(() => false);
+
+      // eslint-disable-next-line no-await-in-loop
+      const clickedText = await clickTargetOnce();
+      if (clickedText) {
+        // eslint-disable-next-line no-await-in-loop
+        const outcome = await waitForFinalActionOutcome(
+          page,
+          beforeUrl,
+          Math.min(
+            1200,
+            Math.max(250, burstTimeoutMs - (Date.now() - burstStart)),
+          ),
+        ).catch(() => null);
+
+        if (outcome === "redirect") {
+          return clickedText;
+        }
+      }
+
+      // Keep the loop aggressive; do not wait for the toast to clear.
+      // eslint-disable-next-line no-await-in-loop
+      await page.waitForTimeout(25).catch(() => {});
+    }
+
+    return null;
+  };
+
+  while (Date.now() - start < effectiveTimeoutMs) {
+    // eslint-disable-next-line no-await-in-loop
+    const clickedText = await clickTargetOnce();
+
     if (clickedText) {
       const outcome = await waitForFinalActionOutcome(
         page,
         beforeUrl,
-        Math.min(4000, Math.max(1000, timeoutMs - (Date.now() - start))),
+        Math.min(
+          4000,
+          Math.max(1000, effectiveTimeoutMs - (Date.now() - start)),
+        ),
       ).catch(() => null);
 
       if (outcome === "redirect") {
         return clickedText;
       }
 
-      if (outcome === "toast" && !applicantRetryUsed) {
-        applicantRetryUsed = true;
+      if (outcome === "toast" && isPendingProceedAction) {
         status(
           "APPLICANT",
-          "Applicant toast detected; unchecking then rechecking checkbox and retrying final action",
+          "Applicant toast detected; bursting applicant checkbox rechecks and final button retries",
         );
-        await resetApplicantCheckbox(page).catch(() => false);
+        const burstResult = await burstPendingProceedAction(
+          Math.max(1000, effectiveTimeoutMs - (Date.now() - start)),
+        );
+        if (burstResult) {
+          return burstResult;
+        }
         continue;
       }
     }
