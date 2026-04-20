@@ -1805,14 +1805,59 @@ async function clickBookPostAppointmentButton(page) {
 }
 
 async function clickProceedButton(page) {
-  const result = await clickExactActionButton(page, "SELECT POST AND PROCEED", {
-    timeoutMs: 20000,
-  });
+  const targetText = "SELECT POST AND PROCEED";
+  const start = Date.now();
+  const timeoutMs = 20000;
+  const beforeUrl = page.url();
+  const proceedSelectors = [
+    ".ofc-book-slot-block button:has-text('SELECT POST AND PROCEED'), .ofc-book-slot-block a:has-text('SELECT POST AND PROCEED'), .ofc-book-slot-block [role='button']:has-text('SELECT POST AND PROCEED')",
+    "button:has-text('SELECT POST AND PROCEED'), a:has-text('SELECT POST AND PROCEED'), [role='button']:has-text('SELECT POST AND PROCEED')",
+  ];
 
-  if (result) {
-    status("PROCEED", `Clicked ${result}`);
+  while (Date.now() - start < timeoutMs) {
+    const remainingMs = timeoutMs - (Date.now() - start);
 
-    return true;
+    await waitForProceedActionable(page, Math.min(2500, remainingMs)).catch(
+      () => false,
+    );
+
+    let clicked = false;
+    for (const selector of proceedSelectors) {
+      // eslint-disable-next-line no-await-in-loop
+      const button = page.locator(selector).first();
+      // eslint-disable-next-line no-await-in-loop
+      clicked = await button
+        .click({ timeout: Math.min(2500, remainingMs), force: true })
+        .then(() => true)
+        .catch(() => false);
+      if (clicked) break;
+    }
+
+    if (clicked) {
+      const outcome = await waitForFinalActionOutcome(
+        page,
+        beforeUrl,
+        Math.min(6000, Math.max(1000, remainingMs)),
+        CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
+      ).catch(() => null);
+
+      if (outcome === "redirect") {
+        status("PROCEED", `Clicked ${targetText}`);
+        return true;
+      }
+    }
+
+    const fallbackClicked = await clickExactActionButton(page, targetText, {
+      timeoutMs: Math.min(3000, remainingMs),
+    }).catch(() => null);
+
+    if (fallbackClicked) {
+      status("PROCEED", `Clicked ${fallbackClicked}`);
+      return true;
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    await page.waitForTimeout(50).catch(() => {});
   }
 
   return false;
