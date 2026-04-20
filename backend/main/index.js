@@ -71,6 +71,46 @@ const CONFIG = {
     Number(process.env.VISA_LOGIN_NAV_TIMEOUT_MS) || 3 * 60 * 1000,
   ),
   PROFILE_DIR: process.env.VISA_PROFILE_DIR || "",
+  HOT_SCAN_SETTLE_MS: Math.max(
+    25,
+    Number(process.env.VISA_HOT_SCAN_SETTLE_MS) || 80,
+  ),
+  HOT_MONTH_CHANGE_WAIT_MS: Math.max(
+    300,
+    Number(process.env.VISA_HOT_MONTH_CHANGE_WAIT_MS) || 800,
+  ),
+  HOT_MONTH_READY_WAIT_MS: Math.max(
+    300,
+    Number(process.env.VISA_HOT_MONTH_READY_WAIT_MS) || 1000,
+  ),
+  HOT_SLOT_READY_TIMEOUT_MS: Math.max(
+    500,
+    Number(process.env.VISA_HOT_SLOT_READY_TIMEOUT_MS) || 1200,
+  ),
+  HOT_SLOT_CLICK_TIMEOUT_MS: Math.max(
+    500,
+    Number(process.env.VISA_HOT_SLOT_CLICK_TIMEOUT_MS) || 1000,
+  ),
+  HOT_SLOT_RETRY_LIMIT: Math.max(
+    1,
+    Number(process.env.VISA_HOT_SLOT_RETRY_LIMIT) || 4,
+  ),
+  HOT_FINAL_OUTCOME_TIMEOUT_MS: Math.max(
+    300,
+    Number(process.env.VISA_HOT_FINAL_OUTCOME_TIMEOUT_MS) || 1000,
+  ),
+  HOT_BURST_OUTCOME_TIMEOUT_MS: Math.max(
+    250,
+    Number(process.env.VISA_HOT_BURST_OUTCOME_TIMEOUT_MS) || 700,
+  ),
+  HOT_FINAL_OUTCOME_POLL_MS: Math.max(
+    25,
+    Number(process.env.VISA_HOT_FINAL_OUTCOME_POLL_MS) || 50,
+  ),
+  HOT_FINAL_BURST_DELAY_MS: Math.max(
+    0,
+    Number(process.env.VISA_HOT_FINAL_BURST_DELAY_MS) || 10,
+  ),
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -379,7 +419,7 @@ async function clickLabelWithClosestClickableAncestor(
   await target.evaluate((element) => {
     element.scrollIntoView({ block: "center", inline: "nearest" });
   });
-  await page.waitForTimeout(250);
+  await page.waitForTimeout(75);
   await target.click({ timeout: timeoutMs, force: true });
   await handle.dispose().catch(() => {});
 }
@@ -469,7 +509,7 @@ async function waitForCalendarUiReady(page, timeoutMs = 45000) {
   }
 
   // Tiny settle so computed styles are stable (used by the green-date detector).
-  await page.waitForTimeout(75);
+  await page.waitForTimeout(CONFIG.HOT_SCAN_SETTLE_MS);
   return true;
 }
 
@@ -492,7 +532,7 @@ async function waitForCalendarMonthDatesReady(page, timeoutMs = 2000) {
     return false;
   }
 
-  await page.waitForTimeout(60).catch(() => {});
+  await page.waitForTimeout(CONFIG.HOT_SCAN_SETTLE_MS).catch(() => {});
   return true;
 }
 
@@ -547,7 +587,7 @@ async function waitForTimeSlotsUiReady(page, timeoutMs = 20000) {
     }
 
     // eslint-disable-next-line no-await-in-loop
-    await page.waitForTimeout(150);
+    await page.waitForTimeout(CONFIG.HOT_SCAN_SETTLE_MS);
   }
 
   return false;
@@ -912,17 +952,20 @@ async function setApplicantCheckboxState(page, desiredChecked) {
   }, Boolean(desiredChecked));
 }
 
-async function ensureApplicantChecked(page) {
+async function ensureApplicantChecked(
+  page,
+  { attempts = 2, delayMs = 200 } = {},
+) {
   const trySelect = async () => setApplicantCheckboxState(page, true);
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const selected = await trySelect().catch(() => false);
     if (selected) {
       return true;
     }
 
-    if (attempt === 0) {
-      await page.waitForTimeout(200);
+    if (attempt < attempts - 1 && delayMs > 0) {
+      await page.waitForTimeout(delayMs);
     }
   }
 
@@ -1252,7 +1295,11 @@ async function clickNextAvailableDateAfter(page, afterDateText) {
 
   if (outcome.mode === "NEXT_MONTH") {
     const beforeHeader = await getCalendarHeaderText(page).catch(() => "");
-    await waitForCalendarMonthChange(page, beforeHeader, 1600).catch(() => {});
+    await waitForCalendarMonthChange(
+      page,
+      beforeHeader,
+      CONFIG.HOT_MONTH_CHANGE_WAIT_MS,
+    ).catch(() => {});
     const clickedText = await clickFirstGreenDate(page);
     if (clickedText && clickedText !== "OUT_OF_RANGE") {
       status("DATE", `Advanced to next month date ${clickedText}`);
@@ -1314,11 +1361,11 @@ async function waitForCalendarMonthChange(
     const after = await getCalendarHeaderText(page).catch(() => "");
     if (after && after !== before) return;
     // eslint-disable-next-line no-await-in-loop
-    await sleep(80);
+    await sleep(50);
   }
 
   // Fallback: even if header didn't change, give the DOM a tiny settle.
-  await sleep(200);
+  await sleep(100);
 }
 
 async function canGoToNextCalendarMonth(page) {
@@ -1442,8 +1489,15 @@ async function huntGreenDate(
     const moved = await clickNextCalendarMonth(page);
     if (!moved) break;
     monthAttempts += 1;
-    await waitForCalendarMonthChange(page, beforeHeader, 1600);
-    await waitForCalendarMonthDatesReady(page, 2000).catch(() => {});
+    await waitForCalendarMonthChange(
+      page,
+      beforeHeader,
+      CONFIG.HOT_MONTH_CHANGE_WAIT_MS,
+    );
+    await waitForCalendarMonthDatesReady(
+      page,
+      CONFIG.HOT_MONTH_READY_WAIT_MS,
+    ).catch(() => {});
   }
 
   return {
@@ -1747,11 +1801,6 @@ async function clickBookPostAppointmentButton(page) {
   if (!result) return false;
 
   status("BOOK", `Clicked ${result}`);
-  await page
-    .locator(".ngx-spinner-overlay")
-    .first()
-    .waitFor({ state: "hidden", timeout: 20000 })
-    .catch(() => {});
   return true;
 }
 
@@ -1762,14 +1811,6 @@ async function clickProceedButton(page) {
 
   if (result) {
     status("PROCEED", `Clicked ${result}`);
-
-    // Best-effort: wait for any post-click loading to settle so the next loop
-    // doesn't race the UI.
-    await page
-      .locator(".ngx-spinner-overlay")
-      .first()
-      .waitFor({ state: "hidden", timeout: 20000 })
-      .catch(() => {});
 
     return true;
   }
@@ -1796,6 +1837,12 @@ async function clickExactActionButton(
   const effectiveTimeoutMs = isPendingProceedAction
     ? Math.max(timeoutMs, 45000)
     : timeoutMs;
+  const outcomeTimeoutMs = isPendingProceedAction
+    ? CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS
+    : 4000;
+  const burstOutcomeTimeoutMs = isPendingProceedAction
+    ? CONFIG.HOT_BURST_OUTCOME_TIMEOUT_MS
+    : 1200;
 
   const clickTargetOnce = async () =>
     page
@@ -1883,9 +1930,10 @@ async function clickExactActionButton(
           page,
           beforeUrl,
           Math.min(
-            1200,
+            burstOutcomeTimeoutMs,
             Math.max(250, burstTimeoutMs - (Date.now() - burstStart)),
           ),
+          CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
         ).catch(() => null);
 
         if (outcome === "redirect") {
@@ -1895,7 +1943,9 @@ async function clickExactActionButton(
 
       // Keep the loop aggressive; do not wait for the toast to clear.
       // eslint-disable-next-line no-await-in-loop
-      await page.waitForTimeout(25).catch(() => {});
+      await page
+        .waitForTimeout(CONFIG.HOT_FINAL_BURST_DELAY_MS)
+        .catch(() => {});
     }
 
     return null;
@@ -1910,9 +1960,10 @@ async function clickExactActionButton(
         page,
         beforeUrl,
         Math.min(
-          4000,
+          outcomeTimeoutMs,
           Math.max(1000, effectiveTimeoutMs - (Date.now() - start)),
         ),
+        CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
       ).catch(() => null);
 
       if (outcome === "redirect") {
@@ -1935,13 +1986,18 @@ async function clickExactActionButton(
     }
 
     // eslint-disable-next-line no-await-in-loop
-    await page.waitForTimeout(100);
+    await page.waitForTimeout(CONFIG.HOT_FINAL_OUTCOME_POLL_MS);
   }
 
   return null;
 }
 
-async function waitForFinalActionOutcome(page, beforeUrl, timeoutMs = 10000) {
+async function waitForFinalActionOutcome(
+  page,
+  beforeUrl,
+  timeoutMs = 10000,
+  pollIntervalMs = 100,
+) {
   const previousUrl = String(beforeUrl || "");
   if (!previousUrl) return false;
 
@@ -1963,7 +2019,7 @@ async function waitForFinalActionOutcome(page, beforeUrl, timeoutMs = 10000) {
     }
 
     // eslint-disable-next-line no-await-in-loop
-    await page.waitForTimeout(100);
+    await page.waitForTimeout(pollIntervalMs);
   }
 
   return null;
@@ -2036,13 +2092,14 @@ async function attemptBooking(page) {
 
   let activeDate = dateSelected;
   let slotSelected = false;
-  const slotRetryLimit = 6;
+  const slotRetryLimit = CONFIG.HOT_SLOT_RETRY_LIMIT;
 
   for (let retry = 0; retry < slotRetryLimit; retry += 1) {
     status("SLOT", `Waiting for time slots to load for date ${activeDate}`);
-    const slotsReady = await waitForTimeSlotsUiReady(page, 3000).catch(
-      () => false,
-    );
+    const slotsReady = await waitForTimeSlotsUiReady(
+      page,
+      CONFIG.HOT_SLOT_READY_TIMEOUT_MS,
+    ).catch(() => false);
     if (!slotsReady) {
       status(
         "SLOT",
@@ -2050,7 +2107,10 @@ async function attemptBooking(page) {
       );
     } else {
       // Keep the time selection fast: choose the earliest visible slot only.
-      slotSelected = await clickEarliestTimeSlot(page, 2000);
+      slotSelected = await clickEarliestTimeSlot(
+        page,
+        CONFIG.HOT_SLOT_CLICK_TIMEOUT_MS,
+      );
       if (slotSelected) {
         break;
       }
@@ -2099,7 +2159,12 @@ async function attemptBooking(page) {
   }
 
   status("APPLICANT", "Rechecking applicant checkbox before final action");
-  await ensureApplicantChecked(page).catch(() => false);
+  await ensureApplicantChecked(
+    page,
+    CONFIG.RESCHEDULE
+      ? { attempts: 2, delayMs: 200 }
+      : { attempts: 1, delayMs: 0 },
+  ).catch(() => false);
 
   // Reschedule flow: immediately click BOOK POST APPOINTMENT.
   if (CONFIG.RESCHEDULE) {
