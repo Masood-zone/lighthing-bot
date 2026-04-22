@@ -2097,8 +2097,7 @@ async function attemptBooking(page) {
     );
   }
 
-  // If we find only out-of-range greens, or no usable green at all, we MAY
-  // refresh pickup and re-scan. This is throttled to avoid hammering the UI.
+  // If we find only out-of-range greens, or no usable green at all, we MAY refresh pickup and re-scan. This is throttled to avoid hammering the UI.
   if (dateSelected === "OUT_OF_RANGE" || !dateSelected) {
     consecutiveNoDateAttempts += 1;
 
