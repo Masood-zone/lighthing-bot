@@ -425,28 +425,173 @@ async function clickLabelWithClosestClickableAncestor(
 }
 
 async function clickPendingAppointmentTile(page) {
-  const exactLabels = ["PENDING APPOINTMENT REQUEST", "PENDING APPOINTMENT"];
+  const deadline = Date.now() + 15000;
+  const candidateLocators = [
+    page.getByRole("button", { name: /pending appointment request/i }).first(),
+    page.getByRole("link", { name: /pending appointment request/i }).first(),
+    page.getByText(/pending appointment request/i).first(),
+    page.getByRole("button", { name: /pending appointment/i }).first(),
+    page.getByRole("link", { name: /pending appointment/i }).first(),
+    page.getByText(/pending appointment/i).first(),
+    page
+      .locator(
+        "xpath=//*[contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'PENDING') and contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'APPOINTMENT') and not(contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'CANCEL APPOINTMENT'))]",
+      )
+      .first(),
+  ];
 
-  for (const label of exactLabels) {
-    const exactLocator = page.locator(
-      `xpath=//*[normalize-space(.)=${JSON.stringify(label)}]`,
-    );
+  while (Date.now() < deadline) {
+    for (const locator of candidateLocators) {
+      if (!(await locator.isVisible().catch(() => false))) {
+        continue;
+      }
 
-    if ((await exactLocator.count().catch(() => 0)) > 0) {
-      await clickLabelWithClosestClickableAncestor(page, exactLocator);
+      await clickLabelWithClosestClickableAncestor(page, locator);
       return true;
     }
-  }
 
-  const fallback = page.locator(
-    "xpath=//*[contains(normalize-space(.), 'PENDING APPOINTMENT') and not(contains(normalize-space(.), 'CANCEL APPOINTMENT'))]",
-  );
-  if ((await fallback.count().catch(() => 0)) > 0) {
-    await clickLabelWithClosestClickableAncestor(page, fallback);
-    return true;
+    await page.waitForTimeout(250).catch(() => {});
   }
 
   throw new Error("Pending Appointment Request button not found on dashboard.");
+}
+
+async function clickRescheduleForCurrentUser(page) {
+  const deadline = Date.now() + 30000;
+
+  while (Date.now() < deadline) {
+    const clickedText = await page
+      .evaluate(
+        ({ displayName, email }) => {
+          const normalize = (value) =>
+            String(value || "")
+              .replace(/\s+/g, " ")
+              .trim()
+              .toUpperCase();
+
+          const isVisible = (element) => {
+            if (!element) return false;
+            const style = window.getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return (
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              rect.width > 0 &&
+              rect.height > 0
+            );
+          };
+
+          const isActionable = (element) =>
+            element &&
+            element.getAttribute("aria-disabled") !== "true" &&
+            !element.disabled;
+
+          const elementText = (element) =>
+            normalize(
+              element?.textContent ||
+                element?.getAttribute?.("aria-label") ||
+                element?.getAttribute?.("title") ||
+                "",
+            );
+
+          const clickElement = (element) => {
+            if (!element || !isVisible(element) || !isActionable(element)) {
+              return null;
+            }
+
+            try {
+              element.scrollIntoView({ block: "center", inline: "nearest" });
+            } catch {
+              // ignore
+            }
+
+            try {
+              element.click();
+              return elementText(element);
+            } catch {
+              return null;
+            }
+          };
+
+          const collectRescheduleButtons = (root) =>
+            Array.from(
+              root.querySelectorAll(
+                "a.my-app-button-popup-resch, a, button, [role='button'], [tabindex]",
+              ),
+            ).filter(
+              (element) =>
+                isVisible(element) &&
+                isActionable(element) &&
+                /RESCHEDULE/i.test(elementText(element)),
+            );
+
+          const searchNeedles = [displayName, email]
+            .map(normalize)
+            .filter(Boolean);
+
+          const matchingElements = Array.from(
+            document.querySelectorAll("body *"),
+          )
+            .map((element) => ({
+              element,
+              text: elementText(element),
+              area: (() => {
+                const rect = element.getBoundingClientRect();
+                return rect.width * rect.height;
+              })(),
+            }))
+            .filter(
+              ({ element, text }) =>
+                isVisible(element) &&
+                text &&
+                searchNeedles.some((needle) => text.includes(needle)),
+            )
+            .sort((left, right) => left.area - right.area);
+
+          const visited = new Set();
+
+          for (const { element } of matchingElements) {
+            let current = element;
+
+            for (let depth = 0; depth < 6 && current; depth += 1) {
+              if (visited.has(current)) {
+                current = current.parentElement;
+                continue;
+              }
+
+              visited.add(current);
+
+              const buttons = collectRescheduleButtons(current);
+              if (buttons.length > 0) {
+                return clickElement(buttons[0]);
+              }
+
+              current = current.parentElement;
+            }
+          }
+
+          const fallback = collectRescheduleButtons(document)[0];
+          if (fallback) {
+            return clickElement(fallback);
+          }
+
+          return null;
+        },
+        {
+          displayName: CONFIG.USER_DISPLAY_NAME,
+          email: CONFIG.USER_EMAIL,
+        },
+      )
+      .catch(() => null);
+
+    if (clickedText) {
+      return true;
+    }
+
+    await page.waitForTimeout(250).catch(() => {});
+  }
+
+  return false;
 }
 
 async function waitForAppointmentBookingPageReady(page, timeoutMs = 60000) {
@@ -659,7 +804,10 @@ async function openAppointmentMode(page) {
   status("MODE", `Opening ${targetText}`);
 
   const bookingBlock = page.locator(".ofc-book-slot-block").first();
-  if (await bookingBlock.count().catch(() => 0)) {
+  if (
+    (await bookingBlock.isVisible().catch(() => false)) ||
+    /\/home\/appointment\/slot(?:[/?#]|$)/i.test(page.url())
+  ) {
     return true;
   }
 
@@ -675,7 +823,7 @@ async function openAppointmentMode(page) {
 
     const rescheduleBtn = page
       .locator(
-        "a.my-app-button-popup-resch, a:has-text('RESCHEDULE'), button:has-text('RESCHEDULE')",
+        "a.my-app-button-popup-resch, a:has-text('RESCHEDULE'), button:has-text('RESCHEDULE'), [role='button']:has-text('RESCHEDULE')",
       )
       .first();
 
@@ -710,7 +858,18 @@ async function openAppointmentMode(page) {
     };
     page.once("dialog", onNativeDialog);
 
-    await rescheduleBtn.click({ timeout: 15000, force: true });
+    let clicked = await clickRescheduleForCurrentUser(page).catch(() => false);
+    if (!clicked) {
+      // Sometimes the my-appointments page needs one reload to fully hydrate.
+      await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+      await page.waitForTimeout(800).catch(() => {});
+      clicked = await clickRescheduleForCurrentUser(page).catch(() => false);
+    }
+
+    if (!clicked) {
+      throw new Error("Reschedule button not found on My Appointments.");
+    }
+
     status("RESCHEDULE_CLICK", "Clicked RESCHEDULE");
 
     const bookingBlockAfterClick = getBookingBlockLocator(page);
