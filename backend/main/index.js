@@ -381,7 +381,7 @@ function buildProxyConfig() {
   try {
     const parsed = new URL(normalized);
     const proxy = {
-      // parsed.protocol includes the trailing ":" (e.g., "http:")
+      // URL.protocol is like "http:" (no slashes), so add "//" to form "http://host".
       server: `${parsed.protocol}//${parsed.host}`,
     };
     if (parsed.username) {

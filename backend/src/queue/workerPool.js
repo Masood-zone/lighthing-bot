@@ -41,7 +41,7 @@ function hashToIndex(value, modulo) {
 function selectProxyUrl(sessionId, pool, fallback) {
   if (Array.isArray(pool) && pool.length > 0) {
     const index = hashToIndex(sessionId, pool.length);
-    return pool[index] || "";
+    return pool[index];
   }
   return fallback || "";
 }
