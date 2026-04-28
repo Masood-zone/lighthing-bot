@@ -27,11 +27,13 @@ function parseProxyPool(value) {
 
 function hashToIndex(value, modulo) {
   if (!modulo) return 0;
-  let hash = 0;
-  for (const ch of String(value || "")) {
-    hash = (hash + ch.charCodeAt(0)) % modulo;
+  let hash = 0x811c9dc5;
+  const str = String(value || "");
+  for (let i = 0; i < str.length; i += 1) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
   }
-  return hash;
+  return Math.abs(hash) % modulo;
 }
 
 function selectProxyUrl(sessionId, pool, fallback) {

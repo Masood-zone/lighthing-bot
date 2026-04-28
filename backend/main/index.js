@@ -395,9 +395,10 @@ function buildProxyConfig() {
     }
     return proxy;
   } catch (err) {
+    const detail = err?.message ? ` (${err.message})` : "";
     // eslint-disable-next-line no-console
     console.warn(
-      "[WARN] Invalid VISA_PROXY_URL provided; continuing without proxy.",
+      `[WARN] Invalid VISA_PROXY_URL provided; continuing without proxy${detail}.`,
     );
     return null;
   }
