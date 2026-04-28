@@ -381,6 +381,7 @@ function buildProxyConfig() {
   try {
     const parsed = new URL(normalized);
     const proxy = {
+      // parsed.protocol includes the trailing ":" (e.g., "http:")
       server: `${parsed.protocol}//${parsed.host}`,
     };
     if (parsed.username) {

@@ -19,6 +19,7 @@ function readBoolEnv(name) {
 
 function parseProxyPool(value) {
   if (!value) return [];
+  // Entries are not validated here; invalid proxy URLs will be ignored by the worker.
   return String(value)
     .split(/[\n,;]+/)
     .map((entry) => entry.trim())
@@ -27,6 +28,7 @@ function parseProxyPool(value) {
 
 function hashToIndex(value, modulo) {
   if (!modulo) return 0;
+  // FNV-1a hash for deterministic session-to-proxy mapping with stable distribution.
   let hash = 0x811c9dc5;
   const str = String(value || "");
   for (let i = 0; i < str.length; i += 1) {
