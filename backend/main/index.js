@@ -165,14 +165,48 @@ function addMonthsToMonthYear(monthYear, months) {
   };
 }
 
+function clampMonthYearToAllowedRange(monthYear, allowed) {
+  if (!monthYear) return null;
+
+  const minTarget = allowed.min
+    ? {
+        year: allowed.min.getUTCFullYear(),
+        monthIndex: allowed.min.getUTCMonth(),
+      }
+    : null;
+  const maxTarget = allowed.max
+    ? {
+        year: allowed.max.getUTCFullYear(),
+        monthIndex: allowed.max.getUTCMonth(),
+      }
+    : null;
+
+  if (minTarget && monthKey(monthYear) < monthKey(minTarget)) {
+    return minTarget;
+  }
+
+  if (maxTarget && monthKey(monthYear) > monthKey(maxTarget)) {
+    return maxTarget;
+  }
+
+  return monthYear;
+}
+
 function getNextTraversalMonthTarget(page) {
+  const allowed = getAllowedDateRange();
+
   if (calendarResumeTarget) {
-    return Promise.resolve(calendarResumeTarget);
+    return Promise.resolve(
+      clampMonthYearToAllowedRange(calendarResumeTarget, allowed),
+    );
   }
 
   return getCalendarMonthYear(page)
     .then((currentMonth) =>
-      currentMonth ? addMonthsToMonthYear(currentMonth, 1) : null,
+      clampMonthYearToAllowedRange(
+        currentMonth ? addMonthsToMonthYear(currentMonth, 1) : null,
+        allowed,
+      ),
     )
     .catch(() => null);
 }
@@ -1599,14 +1633,10 @@ async function huntGreenDate(
         monthIndex: allowed.min.getUTCMonth(),
       }
     : null;
-  const resumeTarget =
-    explicitStartTarget || calendarResumeTarget || allowedMinTarget;
-  const startTarget =
-    resumeTarget &&
-    allowedMinTarget &&
-    monthKey(resumeTarget) < monthKey(allowedMinTarget)
-      ? allowedMinTarget
-      : resumeTarget;
+  const startTarget = clampMonthYearToAllowedRange(
+    explicitStartTarget || calendarResumeTarget || allowedMinTarget,
+    allowed,
+  );
   await navigateCalendarToMonth(page, startTarget, 24).catch(() => false);
   await waitForCalendarMonthDatesReady(page, 2000).catch(() => {});
 
@@ -1663,9 +1693,10 @@ async function huntGreenDate(
     dateSelected: dateSelected || (outOfRangeFound ? "OUT_OF_RANGE" : null),
     monthAttempts,
     outOfRangeFound,
-    resumeTarget: currentHeader
-      ? addMonthsToMonthYear(currentHeader, 1)
-      : startTarget,
+    resumeTarget: clampMonthYearToAllowedRange(
+      currentHeader ? addMonthsToMonthYear(currentHeader, 1) : startTarget,
+      allowed,
+    ),
   };
 }
 
@@ -1790,7 +1821,7 @@ async function refreshPickupAndRetryDateHunt(page, reason) {
   status("PICKUP_REFRESH", "Pickup refreshed; running a second fast date hunt");
   const { dateSelected, monthAttempts, resumeTarget } =
     await huntGreenDate(page);
-  calendarResumeTarget = resumeTarget || calendarResumeTarget;
+  calendarResumeTarget = resumeTarget;
   if (monthAttempts > 0) {
     status(
       "CALENDAR",
@@ -2247,7 +2278,7 @@ async function attemptBooking(page) {
   }
 
   let { dateSelected, monthAttempts, resumeTarget } = await huntGreenDate(page);
-  calendarResumeTarget = resumeTarget || calendarResumeTarget;
+  calendarResumeTarget = resumeTarget;
 
   if (monthAttempts > 0) {
     status(
@@ -2345,7 +2376,7 @@ async function attemptBooking(page) {
       resumeTarget: nextMonthTarget,
     }));
 
-    calendarResumeTarget = nextMonthScan.resumeTarget || nextMonthTarget;
+    calendarResumeTarget = nextMonthScan.resumeTarget;
 
     if (!nextMonthScan.dateSelected) {
       status("DATE", "No usable date found in later months");
