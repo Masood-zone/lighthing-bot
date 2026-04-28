@@ -216,6 +216,111 @@ function formatMonthYear(monthYear) {
   return `${monthYear.year}-${String(monthYear.monthIndex + 1).padStart(2, "0")}`;
 }
 
+function getMonthShortLabel(monthIndex) {
+  return [
+    "JAN",
+    "FEB",
+    "MAR",
+    "APR",
+    "MAY",
+    "JUN",
+    "JUL",
+    "AUG",
+    "SEP",
+    "OCT",
+    "NOV",
+    "DEC",
+  ][monthIndex];
+}
+
+async function restoreCalendarMonthView(page) {
+  const monthViewVisible = await page
+    .locator("mat-month-view")
+    .first()
+    .isVisible()
+    .catch(() => false);
+
+  if (!monthViewVisible) {
+    await page
+      .locator(".mat-calendar-period-button")
+      .first()
+      .click()
+      .catch(() => {});
+    await page
+      .locator("mat-month-view")
+      .first()
+      .waitFor({ state: "visible", timeout: 1500 })
+      .catch(() => {});
+  }
+}
+
+async function jumpCalendarDirectlyToMonth(page, target, timeoutMs = 6000) {
+  if (!target) return false;
+
+  const current = await getCalendarMonthYear(page).catch(() => null);
+  if (
+    current &&
+    current.year === target.year &&
+    current.monthIndex === target.monthIndex
+  ) {
+    return true;
+  }
+
+  const monthLabel = getMonthShortLabel(target.monthIndex);
+  const monthLabelPattern = new RegExp(`^\\s*${monthLabel}\\s*$`, "i");
+  const yearLabelPattern = new RegExp(`^\\s*${String(target.year)}\\s*$`);
+
+  try {
+    await page.locator(".mat-calendar-period-button").first().click({
+      timeout: timeoutMs,
+    });
+
+    const yearCell = page
+      .locator(
+        "mat-multi-year-view button.mat-calendar-body-cell, mat-multi-year-view td.mat-calendar-body-cell, mat-multi-year-view .mat-calendar-body-cell-content",
+      )
+      .filter({ hasText: yearLabelPattern })
+      .first();
+
+    await yearCell.waitFor({ state: "visible", timeout: timeoutMs });
+    await yearCell.click({ timeout: timeoutMs });
+
+    const monthCell = page
+      .locator(
+        "mat-year-view button.mat-calendar-body-cell, mat-year-view td.mat-calendar-body-cell, mat-year-view .mat-calendar-body-cell-content",
+      )
+      .filter({ hasText: monthLabelPattern })
+      .first();
+
+    await monthCell.waitFor({ state: "visible", timeout: timeoutMs });
+    await monthCell.click({ timeout: timeoutMs });
+
+    await page
+      .locator("mat-month-view")
+      .first()
+      .waitFor({ state: "visible", timeout: timeoutMs });
+
+    const targetHeader = `${monthLabel} ${target.year}`;
+    await page.waitForFunction(
+      ({ expectedHeader }) => {
+        const header = document.querySelector(".mat-calendar-period-button");
+        const text = String(header?.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toUpperCase();
+        return text === expectedHeader;
+      },
+      { expectedHeader: targetHeader },
+      { timeout: timeoutMs },
+    );
+
+    return true;
+  } catch {
+    await restoreCalendarMonthView(page);
+    return false;
+  }
+}
+
 function getAllowedDateRange() {
   // Back-compat with Selenium worker envs:
   // - Prefer VISA_MIN_DATE/VISA_MAX_DATE
@@ -1585,7 +1690,7 @@ async function navigateCalendarToMonth(page, target, maxSteps = 24) {
   for (let steps = 0; steps < maxSteps; steps += 1) {
     // eslint-disable-next-line no-await-in-loop
     const current = await getCalendarMonthYear(page).catch(() => null);
-    if (!current) return false;
+    if (!current) break;
 
     const currentKey = monthKey(current);
     const targetKey = monthKey(target);
@@ -1612,7 +1717,7 @@ async function navigateCalendarToMonth(page, target, maxSteps = 24) {
     }
   }
 
-  return true;
+  return jumpCalendarDirectlyToMonth(page, target).catch(() => false);
 }
 
 async function huntGreenDate(
