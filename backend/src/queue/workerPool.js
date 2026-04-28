@@ -17,6 +17,31 @@ function readBoolEnv(name) {
   return v === "1" || String(v).toLowerCase() === "true";
 }
 
+function parseProxyPool(value) {
+  if (!value) return [];
+  return String(value)
+    .split(/[\n,;]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function hashToIndex(value, modulo) {
+  if (!modulo) return 0;
+  let hash = 0;
+  for (const ch of String(value || "")) {
+    hash = (hash + ch.charCodeAt(0)) % modulo;
+  }
+  return hash;
+}
+
+function selectProxyUrl(sessionId, pool, fallback) {
+  if (Array.isArray(pool) && pool.length > 0) {
+    const index = hashToIndex(sessionId, pool.length);
+    return pool[index] || "";
+  }
+  return fallback || "";
+}
+
 function safeOneLine(value) {
   return String(value ?? "")
     .replace(/[\r\n]+/g, " ")
@@ -94,6 +119,13 @@ class WorkerPool {
     this.workerEntry = workerEntry;
     this.baseDir = baseDir;
     this.profilesDir = profilesDir || path.join(this.baseDir, "profiles");
+
+    const proxyPoolRaw =
+      process.env.VISA_PROXY_POOL || process.env.VISA_PROXY_URLS || "";
+    this.proxyPool = parseProxyPool(proxyPoolRaw);
+    this.proxyFallback = String(
+      process.env.VISA_PROXY_URL || process.env.VISA_PROXY_SERVER || "",
+    ).trim();
 
     this.notificationService = notificationService || null;
 
@@ -297,6 +329,15 @@ class WorkerPool {
           ? ""
           : String(session.config.weeksFromNowMax),
     };
+
+    const proxyUrl = selectProxyUrl(
+      sessionId,
+      this.proxyPool,
+      this.proxyFallback,
+    );
+    if (proxyUrl) {
+      env.VISA_PROXY_URL = proxyUrl;
+    }
 
     const child = fork(this.workerEntry, [], {
       env,

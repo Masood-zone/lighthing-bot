@@ -111,6 +111,8 @@ const CONFIG = {
     0,
     Number(process.env.VISA_HOT_FINAL_BURST_DELAY_MS) || 10,
   ),
+  PROXY_URL: process.env.VISA_PROXY_URL || process.env.VISA_PROXY_SERVER || "",
+  PROXY_BYPASS: process.env.VISA_PROXY_BYPASS || "",
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -366,6 +368,41 @@ function status(state, message) {
   });
 }
 
+function normalizeProxyUrl(raw) {
+  const trimmed = String(raw || "").trim();
+  if (!trimmed) return "";
+  if (/^[a-z]+:\/\//i.test(trimmed)) return trimmed;
+  return `http://${trimmed}`;
+}
+
+function buildProxyConfig() {
+  const normalized = normalizeProxyUrl(CONFIG.PROXY_URL);
+  if (!normalized) return null;
+  try {
+    const parsed = new URL(normalized);
+    const proxy = {
+      server: `${parsed.protocol}//${parsed.host}`,
+    };
+    if (parsed.username) {
+      proxy.username = decodeURIComponent(parsed.username);
+    }
+    if (parsed.password) {
+      proxy.password = decodeURIComponent(parsed.password);
+    }
+    const bypass = String(CONFIG.PROXY_BYPASS || "").trim();
+    if (bypass) {
+      proxy.bypass = bypass;
+    }
+    return proxy;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[WARN] Invalid VISA_PROXY_URL provided; continuing without proxy.",
+    );
+    return null;
+  }
+}
+
 async function launchBrowser() {
   status(
     "BROWSER",
@@ -392,6 +429,12 @@ async function launchBrowser() {
       "--disable-dev-shm-usage",
     ],
   };
+
+  const proxyConfig = buildProxyConfig();
+  if (proxyConfig) {
+    launchOptions.proxy = proxyConfig;
+    status("BROWSER", "Proxy configured for this session");
+  }
 
   if (CONFIG.PROFILE_DIR) {
     const context = await chromium.launchPersistentContext(

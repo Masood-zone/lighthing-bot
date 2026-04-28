@@ -21,6 +21,9 @@ This file documents the _actual runtime algorithm_ executed by the Selenium work
 - `VISA_HEADLESS` — `true|false`
 - `VISA_PROFILE_DIR` — Chrome user-data-dir path (set by the server per session)
 - `VISA_SESSION_ID` — used for backend logs/status association
+- `VISA_PROXY_URL` — optional proxy for a worker (format: `http[s]://user:pass@host:port` or `socks5://host:port`)
+- `VISA_PROXY_POOL` — optional comma/newline-separated list of proxy URLs; the backend assigns one per session deterministically
+- `VISA_PROXY_BYPASS` — optional bypass list passed to Playwright (comma-separated host globs)
 
 ### Date-range filtering (green dates must be inside this window)
 
