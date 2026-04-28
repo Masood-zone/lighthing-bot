@@ -27,8 +27,9 @@ function parseProxyPool(value) {
 }
 
 function hashToIndex(value, modulo) {
+  // Guard against empty pools.
   if (!modulo) return 0;
-  // FNV-1a hash for deterministic session-to-proxy mapping with stable distribution.
+  // FNV-1a-inspired (JS 32-bit variant) hash for deterministic session-to-proxy mapping.
   let hash = 0x811c9dc5;
   const str = String(value || "");
   for (let i = 0; i < str.length; i += 1) {
