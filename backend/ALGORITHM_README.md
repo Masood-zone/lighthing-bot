@@ -25,6 +25,13 @@ This file documents the _actual runtime algorithm_ executed by the Selenium work
 - `VISA_PROXY_POOL` — optional comma/newline-separated list of proxy URLs; the backend assigns one per session deterministically
 - `VISA_PROXY_BYPASS` — optional bypass list passed to Playwright (comma-separated host globs)
 
+For Oxylabs testing, put one full proxy URL per worker session into `VISA_PROXY_POOL`. For example, you can list distinct Oxylabs gateway URLs on separate lines, such as `http://user:pass@dc.oxylabs.io:8000` or `http://user:pass@pr.oxylabs.io:7777` when your account is provisioned for that endpoint.
+
+The backend logs which pool entry was assigned to each session using a sanitized proxy label and short fingerprint. That lets you verify that concurrent browser sessions are being spread across different proxy entries without exposing credentials in the logs.
+
+When multiple sessions run at once, `VISA_PROXY_POOL` is the setting that spreads them across different IPs. `VISA_PROXY_URL` is a single-proxy fallback and will still send every session through the same IP if the pool is not configured.
+For best isolation, keep the proxy pool at least as large as `MAX_CONCURRENT`; otherwise the hash-based assignment can still place multiple sessions on the same proxy.
+
 ### Date-range filtering (green dates must be inside this window)
 
 Preferred:
