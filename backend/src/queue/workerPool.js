@@ -17,6 +17,90 @@ function readBoolEnv(name) {
   return v === "1" || String(v).toLowerCase() === "true";
 }
 
+function parseProxyPool(value) {
+  if (!value) return [];
+  // Entries are not validated here; invalid proxy URLs will be ignored by the worker.
+  return String(value)
+    .split(/[\n,;]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function hashToIndex(value, modulo) {
+  // Guard against empty pools.
+  if (!modulo) return 0;
+  // FNV-1a-inspired (JS 32-bit variant) hash for deterministic session-to-proxy mapping.
+  let hash = 0x811c9dc5;
+  const str = String(value || "");
+  for (let i = 0; i < str.length; i += 1) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return Math.abs(hash) % modulo;
+}
+
+function hashString(value) {
+  let hash = 0x811c9dc5;
+  const str = String(value || "");
+  for (let i = 0; i < str.length; i += 1) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+function describeProxyUrl(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+
+  const fingerprint = hashString(value).toString(16).padStart(8, "0");
+
+  try {
+    const parsed = new URL(value);
+    return `${parsed.protocol}//${parsed.host}#${fingerprint}`;
+  } catch {
+    return `proxy#${fingerprint}`;
+  }
+}
+
+function selectProxySelection(sessionId, pool, fallback) {
+  if (Array.isArray(pool) && pool.length > 0) {
+    const index = hashToIndex(sessionId, pool.length);
+    return {
+      proxyIndex: index,
+      proxySource: "pool",
+      proxyUrl: pool[index],
+    };
+  }
+  return {
+    proxyIndex: null,
+    proxySource: fallback ? "fallback" : "none",
+    proxyUrl: fallback || "",
+  };
+}
+
+function selectProxyUrl(sessionId, pool, fallback) {
+  return selectProxySelection(sessionId, pool, fallback).proxyUrl;
+}
+
+function describeProxySelection(selection) {
+  if (!selection?.proxyUrl) return "no proxy";
+
+  const proxyLabel = describeProxyUrl(selection.proxyUrl);
+  if (
+    selection.proxySource === "pool" &&
+    Number.isInteger(selection.proxyIndex)
+  ) {
+    return `pool[${selection.proxyIndex}] ${proxyLabel}`;
+  }
+
+  if (selection.proxySource === "fallback") {
+    return `fallback ${proxyLabel}`;
+  }
+
+  return proxyLabel;
+}
+
 function safeOneLine(value) {
   return String(value ?? "")
     .replace(/[\r\n]+/g, " ")
@@ -94,6 +178,46 @@ class WorkerPool {
     this.workerEntry = workerEntry;
     this.baseDir = baseDir;
     this.profilesDir = profilesDir || path.join(this.baseDir, "profiles");
+
+    const proxyPoolRaw =
+      process.env.VISA_PROXY_POOL || process.env.VISA_PROXY_URLS || "";
+    this.proxyPool = parseProxyPool(proxyPoolRaw);
+    this.proxyFallback = String(
+      process.env.VISA_PROXY_URL || process.env.VISA_PROXY_SERVER || "",
+    ).trim();
+
+    if (
+      this.proxyPool.length > 0 &&
+      this.maxConcurrent > 0 &&
+      this.proxyPool.length < this.maxConcurrent
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[WARN] VISA_PROXY_POOL has ${this.proxyPool.length} entries but MAX_CONCURRENT is ${this.maxConcurrent}; some sessions may still share a proxy/IP.`,
+      );
+    }
+
+    if (
+      this.maxConcurrent > 1 &&
+      this.proxyPool.length === 0 &&
+      this.proxyFallback
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[WARN] VISA_PROXY_URL is configured without VISA_PROXY_POOL; ${this.maxConcurrent} workers will reuse the same proxy/IP.`,
+      );
+    }
+
+    if (
+      this.maxConcurrent > 1 &&
+      this.proxyPool.length === 0 &&
+      !this.proxyFallback
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[WARN] No proxy pool configured; ${this.maxConcurrent} workers will use the local IP.`,
+      );
+    }
 
     this.notificationService = notificationService || null;
 
@@ -298,6 +422,27 @@ class WorkerPool {
           : String(session.config.weeksFromNowMax),
     };
 
+    const proxySelection = selectProxySelection(
+      sessionId,
+      this.proxyPool,
+      this.proxyFallback,
+    );
+    const proxyUrl = proxySelection.proxyUrl;
+    if (proxyUrl) {
+      env.VISA_PROXY_URL = proxyUrl;
+      this.store.appendLog(
+        sessionId,
+        "info",
+        `Assigned proxy ${describeProxySelection(proxySelection)}`,
+      );
+    } else {
+      this.store.appendLog(
+        sessionId,
+        "warn",
+        "No proxy configured for this session; it will use the local IP",
+      );
+    }
+
     const child = fork(this.workerEntry, [], {
       env,
       stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -313,7 +458,9 @@ class WorkerPool {
       sessionId,
       session,
       "Started session",
-      child.pid ? `pid ${child.pid}` : "",
+      child.pid
+        ? `${describeProxySelection(proxySelection)}; pid ${child.pid}`
+        : describeProxySelection(proxySelection),
     );
 
     child.stdout?.on("data", (buf) => {
