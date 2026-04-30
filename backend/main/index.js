@@ -922,67 +922,6 @@ async function waitForTimeSlotsUiReady(page, timeoutMs = 20000) {
   return false;
 }
 
-async function waitForProceedActionable(page, timeoutMs = 20000) {
-  const bookingBlock = getBookingBlockLocator(page);
-  const start = Date.now();
-
-  while (Date.now() - start < timeoutMs) {
-    // eslint-disable-next-line no-await-in-loop
-    const ok = await bookingBlock
-      .evaluate((root, reschedule) => {
-        const isVisible = (element) => {
-          const style = window.getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return (
-            style.display !== "none" &&
-            style.visibility !== "hidden" &&
-            rect.width > 0 &&
-            rect.height > 0
-          );
-        };
-
-        const buttons = Array.from(
-          root.querySelectorAll("button, a, [role='button']"),
-        )
-          .map((element) => ({
-            element,
-            text: String(element.textContent || "")
-              .replace(/\s+/g, " ")
-              .trim()
-              .toUpperCase(),
-          }))
-          .filter(
-            ({ element, text }) =>
-              isVisible(element) &&
-              text &&
-              element.getAttribute("aria-disabled") !== "true" &&
-              !element.disabled,
-          );
-
-        const pick = buttons.find(({ text }) => {
-          if (reschedule) {
-            return /\bSELECT\b/i.test(text) || /\bPROCEED\b/i.test(text);
-          }
-          return (
-            /SELECT POST/i.test(text) ||
-            /PROCEED/i.test(text) ||
-            /BOOK/i.test(text)
-          );
-        });
-
-        return Boolean(pick);
-      }, CONFIG.RESCHEDULE)
-      .catch(() => false);
-
-    if (ok) return true;
-
-    // eslint-disable-next-line no-await-in-loop
-    await page.waitForTimeout(250);
-  }
-
-  return false;
-}
-
 async function openAppointmentMode(page) {
   const targetText = CONFIG.RESCHEDULE ? "RESCHEDULE" : "PENDING APPOINTMENT";
   status("MODE", `Opening ${targetText}`);
@@ -1319,11 +1258,6 @@ async function ensureApplicantChecked(
 async function resetApplicantCheckbox(page) {
   await setApplicantCheckboxState(page, false).catch(() => false);
   await page.waitForTimeout(150).catch(() => {});
-  return setApplicantCheckboxState(page, true).catch(() => false);
-}
-
-async function pulseApplicantCheckbox(page) {
-  await setApplicantCheckboxState(page, false).catch(() => false);
   return setApplicantCheckboxState(page, true).catch(() => false);
 }
 
@@ -2146,61 +2080,16 @@ async function clickBookPostAppointmentButton(page) {
 
 async function clickProceedButton(page) {
   const targetText = "SELECT POST AND PROCEED";
-  const start = Date.now();
-  const timeoutMs = 20000;
-  const beforeUrl = page.url();
-  const proceedSelectors = [
-    ".ofc-book-slot-block button:has-text('SELECT POST AND PROCEED'), .ofc-book-slot-block a:has-text('SELECT POST AND PROCEED'), .ofc-book-slot-block [role='button']:has-text('SELECT POST AND PROCEED')",
-    "button:has-text('SELECT POST AND PROCEED'), a:has-text('SELECT POST AND PROCEED'), [role='button']:has-text('SELECT POST AND PROCEED')",
-  ];
+  const clickedText = await clickExactActionButton(page, targetText, {
+    timeoutMs: 20000,
+  }).catch(() => null);
 
-  while (Date.now() - start < timeoutMs) {
-    const remainingMs = timeoutMs - (Date.now() - start);
-
-    await waitForProceedActionable(page, Math.min(2500, remainingMs)).catch(
-      () => false,
-    );
-
-    let clicked = false;
-    for (const selector of proceedSelectors) {
-      // eslint-disable-next-line no-await-in-loop
-      const button = page.locator(selector).first();
-      // eslint-disable-next-line no-await-in-loop
-      clicked = await button
-        .click({ timeout: Math.min(2500, remainingMs), force: true })
-        .then(() => true)
-        .catch(() => false);
-      if (clicked) break;
-    }
-
-    if (clicked) {
-      const outcome = await waitForFinalActionOutcome(
-        page,
-        beforeUrl,
-        Math.min(6000, Math.max(1000, remainingMs)),
-        CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
-      ).catch(() => null);
-
-      if (outcome === "redirect") {
-        status("PROCEED", `Clicked ${targetText}`);
-        return true;
-      }
-    }
-
-    const fallbackClicked = await clickExactActionButton(page, targetText, {
-      timeoutMs: Math.min(3000, remainingMs),
-    }).catch(() => null);
-
-    if (fallbackClicked) {
-      status("PROCEED", `Clicked ${fallbackClicked}`);
-      return true;
-    }
-
-    // eslint-disable-next-line no-await-in-loop
-    await page.waitForTimeout(50).catch(() => {});
+  if (!clickedText) {
+    return false;
   }
 
-  return false;
+  status("PROCEED", `Clicked ${clickedText}`);
+  return true;
 }
 
 async function clickExactActionButton(
@@ -2223,11 +2112,8 @@ async function clickExactActionButton(
     ? Math.max(timeoutMs, 45000)
     : timeoutMs;
   const outcomeTimeoutMs = isPendingProceedAction
-    ? CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS
+    ? Math.max(CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS, 8000)
     : 4000;
-  const burstOutcomeTimeoutMs = isPendingProceedAction
-    ? CONFIG.HOT_BURST_OUTCOME_TIMEOUT_MS
-    : 1200;
 
   const clickTargetOnce = async () =>
     page
@@ -2299,42 +2185,52 @@ async function clickExactActionButton(
       }, targetText)
       .catch(() => null);
 
-  const burstPendingProceedAction = async (remainingTimeoutMs) => {
-    const burstStart = Date.now();
-    const burstTimeoutMs = Math.max(1000, remainingTimeoutMs);
+  if (isPendingProceedAction) {
+    const clickedText = await clickTargetOnce();
+    if (!clickedText) {
+      return null;
+    }
 
-    while (Date.now() - burstStart < burstTimeoutMs) {
-      // eslint-disable-next-line no-await-in-loop
-      await pulseApplicantCheckbox(page).catch(() => false);
+    const outcome = await waitForFinalActionOutcome(
+      page,
+      beforeUrl,
+      Math.min(outcomeTimeoutMs, Math.max(4000, effectiveTimeoutMs)),
+      CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
+    ).catch(() => null);
 
-      // eslint-disable-next-line no-await-in-loop
-      const clickedText = await clickTargetOnce();
-      if (clickedText) {
-        // eslint-disable-next-line no-await-in-loop
-        const outcome = await waitForFinalActionOutcome(
-          page,
-          beforeUrl,
-          Math.min(
-            burstOutcomeTimeoutMs,
-            Math.max(250, burstTimeoutMs - (Date.now() - burstStart)),
-          ),
-          CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
-        ).catch(() => null);
+    if (outcome === "redirect") {
+      return clickedText;
+    }
 
-        if (outcome === "redirect") {
-          return clickedText;
-        }
+    if (outcome === "toast") {
+      status(
+        "APPLICANT",
+        "Applicant toast detected; rechecking the checkbox once and retrying the final click",
+      );
+      await ensureApplicantChecked(page, { attempts: 2, delayMs: 150 }).catch(
+        () => false,
+      );
+      await page.waitForTimeout(150).catch(() => {});
+
+      const retryClickedText = await clickTargetOnce();
+      if (!retryClickedText) {
+        return null;
       }
 
-      // Keep the loop aggressive; do not wait for the toast to clear.
-      // eslint-disable-next-line no-await-in-loop
-      await page
-        .waitForTimeout(CONFIG.HOT_FINAL_BURST_DELAY_MS)
-        .catch(() => {});
+      const retryOutcome = await waitForFinalActionOutcome(
+        page,
+        beforeUrl,
+        Math.min(outcomeTimeoutMs, Math.max(4000, effectiveTimeoutMs)),
+        CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
+      ).catch(() => null);
+
+      if (retryOutcome === "redirect") {
+        return retryClickedText;
+      }
     }
 
     return null;
-  };
+  }
 
   while (Date.now() - start < effectiveTimeoutMs) {
     // eslint-disable-next-line no-await-in-loop
@@ -2358,14 +2254,8 @@ async function clickExactActionButton(
       if (outcome === "toast" && isPendingProceedAction) {
         status(
           "APPLICANT",
-          "Applicant toast detected; bursting applicant checkbox rechecks and final button retries",
+          "Applicant toast detected; rechecking the checkbox once and retrying the final click",
         );
-        const burstResult = await burstPendingProceedAction(
-          Math.max(1000, effectiveTimeoutMs - (Date.now() - start)),
-        );
-        if (burstResult) {
-          return burstResult;
-        }
         continue;
       }
     }
@@ -2388,6 +2278,7 @@ async function waitForFinalActionOutcome(
 
   const slotPagePattern = /\/home\/appointment\/slot(?:[/?#]|$)/i;
   const start = Date.now();
+  let toastSeenAt = null;
 
   while (Date.now() - start < timeoutMs) {
     const currentUrl = page.url();
@@ -2399,8 +2290,18 @@ async function waitForFinalActionOutcome(
       return "redirect";
     }
 
-    if (await hasSelectApplicantToast(page).catch(() => false)) {
-      return "toast";
+    const toastVisible = await hasSelectApplicantToast(page).catch(() => false);
+    if (toastVisible) {
+      if (toastSeenAt === null) {
+        toastSeenAt = Date.now();
+      } else if (
+        Date.now() - toastSeenAt >=
+        Math.max(500, pollIntervalMs * 2)
+      ) {
+        return "toast";
+      }
+    } else {
+      toastSeenAt = null;
     }
 
     // eslint-disable-next-line no-await-in-loop
@@ -2547,7 +2448,7 @@ async function attemptBooking(page) {
     page,
     CONFIG.RESCHEDULE
       ? { attempts: 2, delayMs: 200 }
-      : { attempts: 1, delayMs: 0 },
+      : { attempts: 2, delayMs: 150 },
   ).catch(() => false);
 
   // Reschedule flow: immediately click BOOK POST APPOINTMENT.
