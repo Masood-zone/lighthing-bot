@@ -1311,6 +1311,14 @@ async function hasSelectApplicantToast(page) {
   return toast.isVisible().catch(() => false);
 }
 
+async function hasBookingSuccessToast(page) {
+  const toast = page
+    .getByText(/Appointment\s+Booked\s+Successfully/i, { exact: false })
+    .first();
+
+  return toast.isVisible().catch(() => false);
+}
+
 function getBookingBlockLocator(page) {
   return page.locator(".ofc-book-slot-block").first();
 }
@@ -2139,7 +2147,7 @@ async function clickProceedButton(page) {
     if (remainingAttempts > 0) {
       status(
         "PROCEED",
-        `No redirect after SELECT POST AND PROCEED click; retrying (${remainingAttempts} left)`,
+        `No booking toast after SELECT POST AND PROCEED click; retrying (${remainingAttempts} left)`,
       );
       await page.waitForTimeout(250).catch(() => {});
     }
@@ -2161,15 +2169,10 @@ async function clickExactActionButton(
   if (!targetText) return null;
 
   const start = Date.now();
-  const beforeUrl = page.url();
   const isPendingProceedAction =
     !CONFIG.RESCHEDULE && targetText === "SELECT POST AND PROCEED";
-  const effectiveTimeoutMs = isPendingProceedAction
-    ? Math.max(timeoutMs, 45000)
-    : timeoutMs;
-  const outcomeTimeoutMs = isPendingProceedAction
-    ? Math.max(CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS, 8000)
-    : 4000;
+  const effectiveTimeoutMs = timeoutMs;
+  const outcomeTimeoutMs = CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS;
 
   const clickTargetOnce = async () =>
     page
@@ -2249,16 +2252,17 @@ async function clickExactActionButton(
 
     const outcome = await waitForFinalActionOutcome(
       page,
-      beforeUrl,
-      Math.min(outcomeTimeoutMs, Math.max(4000, effectiveTimeoutMs)),
+      null,
+      Math.min(outcomeTimeoutMs, Math.max(2500, effectiveTimeoutMs)),
       CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
     ).catch(() => null);
 
-    if (outcome === "redirect") {
+    if (outcome === "booking") {
+      status("BOOKING_TOAST", "Appointment Booked Successfully toast detected");
       return clickedText;
     }
 
-    if (outcome === "toast") {
+    if (outcome === "applicant") {
       status(
         "APPLICANT",
         "Applicant toast detected; rechecking the checkbox once and retrying the final click",
@@ -2275,12 +2279,16 @@ async function clickExactActionButton(
 
       const retryOutcome = await waitForFinalActionOutcome(
         page,
-        beforeUrl,
-        Math.min(outcomeTimeoutMs, Math.max(4000, effectiveTimeoutMs)),
+        null,
+        Math.min(outcomeTimeoutMs, Math.max(2500, effectiveTimeoutMs)),
         CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
       ).catch(() => null);
 
-      if (retryOutcome === "redirect") {
+      if (retryOutcome === "booking") {
+        status(
+          "BOOKING_TOAST",
+          "Appointment Booked Successfully toast detected",
+        );
         return retryClickedText;
       }
     }
@@ -2295,7 +2303,7 @@ async function clickExactActionButton(
     if (clickedText) {
       const outcome = await waitForFinalActionOutcome(
         page,
-        beforeUrl,
+        null,
         Math.min(
           outcomeTimeoutMs,
           Math.max(1000, effectiveTimeoutMs - (Date.now() - start)),
@@ -2303,11 +2311,15 @@ async function clickExactActionButton(
         CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
       ).catch(() => null);
 
-      if (outcome === "redirect") {
+      if (outcome === "booking") {
+        status(
+          "BOOKING_TOAST",
+          "Appointment Booked Successfully toast detected",
+        );
         return clickedText;
       }
 
-      if (outcome === "toast" && isPendingProceedAction) {
+      if (outcome === "applicant" && isPendingProceedAction) {
         status(
           "APPLICANT",
           "Applicant toast detected; rechecking the checkbox once and retrying the final click",
@@ -2329,35 +2341,39 @@ async function waitForFinalActionOutcome(
   timeoutMs = 10000,
   pollIntervalMs = 100,
 ) {
-  const previousUrl = String(beforeUrl || "");
-  if (!previousUrl) return false;
-
-  const slotPagePattern = /\/home\/appointment\/slot(?:[/?#]|$)/i;
   const start = Date.now();
-  let toastSeenAt = null;
+  let bookingToastSeenAt = null;
+  let applicantToastSeenAt = null;
 
   while (Date.now() - start < timeoutMs) {
-    const currentUrl = page.url();
-    if (
-      currentUrl &&
-      currentUrl !== previousUrl &&
-      !slotPagePattern.test(currentUrl)
-    ) {
-      return "redirect";
+    const bookingToastVisible = await hasBookingSuccessToast(page).catch(
+      () => false,
+    );
+    if (bookingToastVisible) {
+      if (bookingToastSeenAt === null) {
+        bookingToastSeenAt = Date.now();
+      } else if (
+        Date.now() - bookingToastSeenAt >=
+        Math.max(500, pollIntervalMs * 2)
+      ) {
+        return "booking";
+      }
+    } else {
+      bookingToastSeenAt = null;
     }
 
     const toastVisible = await hasSelectApplicantToast(page).catch(() => false);
     if (toastVisible) {
-      if (toastSeenAt === null) {
-        toastSeenAt = Date.now();
+      if (applicantToastSeenAt === null) {
+        applicantToastSeenAt = Date.now();
       } else if (
-        Date.now() - toastSeenAt >=
+        Date.now() - applicantToastSeenAt >=
         Math.max(500, pollIntervalMs * 2)
       ) {
-        return "toast";
+        return "applicant";
       }
     } else {
-      toastSeenAt = null;
+      applicantToastSeenAt = null;
     }
 
     // eslint-disable-next-line no-await-in-loop
@@ -2547,12 +2563,13 @@ async function main() {
       });
 
       if (result === "done") {
-        status("SUCCESS", "Final action completed; exiting worker");
+        status("SUCCESS", "Final booking toast confirmed; pausing worker");
         if (!completionReported) {
           completionReported = true;
           status("COMPLETED", "Booking flow completed successfully");
         }
-        break;
+        status("PAUSED", "Booking session left open for manual verification");
+        await new Promise(() => {});
       }
 
       await sleep(
