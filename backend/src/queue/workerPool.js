@@ -101,6 +101,28 @@ function describeProxySelection(selection) {
   return proxyLabel;
 }
 
+function getActiveProxyUrls(activeSessions, proxyAssignments) {
+  const used = new Set();
+
+  for (const sessionId of activeSessions.keys()) {
+    const selection = proxyAssignments.get(sessionId);
+    if (selection?.proxyUrl) {
+      used.add(selection.proxyUrl);
+    }
+  }
+
+  return used;
+}
+
+function selectLeastUsedProxy(pool, activeProxyUrls) {
+  const free = pool.filter((proxyUrl) => !activeProxyUrls.has(proxyUrl));
+  if (free.length > 0) {
+    return free;
+  }
+
+  return pool;
+}
+
 function safeOneLine(value) {
   return String(value ?? "")
     .replace(/[\r\n]+/g, " ")
@@ -227,6 +249,9 @@ class WorkerPool {
     /** @type {Set<string>} */
     this.notifiedSuccess = new Set();
 
+    /** @type {Map<string, {proxyIndex: number|null, proxySource: string, proxyUrl: string}>} */
+    this.proxyAssignments = new Map();
+
     /** @type {string[]} */
     this.queue = [];
     /** @type {Map<string, import('node:child_process').ChildProcess>} */
@@ -322,6 +347,10 @@ class WorkerPool {
         // ignore
       }
     }
+  }
+
+  _releaseProxyAssignment(sessionId) {
+    this.proxyAssignments.delete(sessionId);
   }
 
   _tick() {
@@ -422,12 +451,18 @@ class WorkerPool {
           : String(session.config.weeksFromNowMax),
     };
 
+    const reservedProxyUrls = getActiveProxyUrls(
+      this.active,
+      this.proxyAssignments,
+    );
     const proxySelection = selectProxySelection(
       sessionId,
       this.proxyPool,
       this.proxyFallback,
+      reservedProxyUrls,
     );
     const proxyUrl = proxySelection.proxyUrl;
+    this.proxyAssignments.set(sessionId, proxySelection);
     if (proxyUrl) {
       env.VISA_PROXY_URL = proxyUrl;
       this.store.appendLog(
@@ -569,6 +604,7 @@ class WorkerPool {
 
     child.on("exit", (code, signal) => {
       this.active.delete(sessionId);
+      this._releaseProxyAssignment(sessionId);
       this.bookingContext.delete(sessionId);
       this.notifiedSuccess.delete(sessionId);
       this.store.setRuntime(sessionId, { exitCode: code, signal });

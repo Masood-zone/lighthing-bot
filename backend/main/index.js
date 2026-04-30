@@ -778,6 +778,61 @@ async function clickRescheduleForCurrentUser(page) {
   return false;
 }
 
+async function clickRescheduleConfirmDialog(page, dialogLocator) {
+  const confirmPatterns = [
+    "button:has-text('Confirm')",
+    "button:has-text('CONFIRM')",
+    "button:has-text('Yes')",
+    "button:has-text('YES')",
+    "button:has-text('Ok')",
+    "button:has-text('OK')",
+  ];
+
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    // eslint-disable-next-line no-await-in-loop
+    const visibleDialog = await dialogLocator.isVisible().catch(() => false);
+    if (!visibleDialog) {
+      // eslint-disable-next-line no-await-in-loop
+      await page.waitForTimeout(200).catch(() => {});
+      continue;
+    }
+
+    for (const selector of confirmPatterns) {
+      // eslint-disable-next-line no-await-in-loop
+      const confirmBtn = dialogLocator.locator(selector).first();
+      // eslint-disable-next-line no-await-in-loop
+      const confirmVisible = await confirmBtn
+        .waitFor({ state: "visible", timeout: 1500 })
+        .then(() => true)
+        .catch(() => false);
+
+      if (!confirmVisible) {
+        continue;
+      }
+
+      // eslint-disable-next-line no-await-in-loop
+      const clicked = await confirmBtn
+        .click({ timeout: 5000, force: true })
+        .then(() => true)
+        .catch(() => false);
+      if (clicked) {
+        status("RESCHEDULE_CONFIRM", "Confirmed reschedule dialog");
+        return true;
+      }
+    }
+
+    // Fallback: if the dialog is visible but the button is not yet actionable,
+    // nudge it with Enter once and keep waiting briefly.
+    // eslint-disable-next-line no-await-in-loop
+    await page.keyboard.press("Enter").catch(() => {});
+    // eslint-disable-next-line no-await-in-loop
+    await page.waitForTimeout(200).catch(() => {});
+  }
+
+  return false;
+}
+
 async function waitForAppointmentBookingPageReady(page, timeoutMs = 60000) {
   const bookingBlock = page.locator(".ofc-book-slot-block").first();
   try {
@@ -1000,34 +1055,17 @@ async function openAppointmentMode(page) {
       .locator("mat-dialog-container, [role='dialog']")
       .first();
 
-    const reachedBooking = bookingBlockAfterClick
-      .waitFor({ state: "visible", timeout: 30000 })
-      .then(() => "BOOKING")
-      .catch(() => null);
+    const dialogOpened = await angularDialog
+      .waitFor({ state: "visible", timeout: 15000 })
+      .then(() => true)
+      .catch(() => false);
 
-    const reachedDialog = angularDialog
-      .waitFor({ state: "visible", timeout: 30000 })
-      .then(() => "DIALOG")
-      .catch(() => null);
-
-    const next = await Promise.race([reachedBooking, reachedDialog]).catch(
-      () => null,
-    );
-
-    if (next === "DIALOG") {
-      const confirmBtn = angularDialog
-        .locator(
-          "button:has-text('Confirm'), button:has-text('CONFIRM'), button:has-text('Yes'), button:has-text('YES'), button:has-text('Ok'), button:has-text('OK')",
-        )
-        .first();
-      const confirmVisible = await confirmBtn
-        .waitFor({ state: "visible", timeout: 30000 })
-        .then(() => true)
-        .catch(() => false);
-
-      if (confirmVisible) {
-        await confirmBtn.click({ timeout: 15000, force: true });
-        status("RESCHEDULE_CONFIRM", "Confirmed reschedule dialog");
+    if (dialogOpened) {
+      const confirmed = await clickRescheduleConfirmDialog(page, angularDialog);
+      if (!confirmed) {
+        throw new Error(
+          "Reschedule confirmation dialog did not become actionable.",
+        );
       }
 
       await angularDialog
@@ -1037,7 +1075,12 @@ async function openAppointmentMode(page) {
       await bookingBlockAfterClick
         .waitFor({ state: "visible", timeout: 60000 })
         .catch(() => {});
-    } else if (next === "BOOKING") {
+    } else if (
+      await bookingBlockAfterClick
+        .waitFor({ state: "visible", timeout: 15000 })
+        .then(() => true)
+        .catch(() => false)
+    ) {
       // No dialog; we reached the booking UI directly.
       status("RESCHEDULE_CONFIRM", "Reschedule opened booking UI");
     } else {
