@@ -63,13 +63,20 @@ function describeProxyUrl(raw) {
   }
 }
 
-function selectProxySelection(sessionId, pool, fallback) {
+function selectProxySelection(
+  sessionId,
+  pool,
+  fallback,
+  reservedProxyUrls = new Set(),
+) {
   if (Array.isArray(pool) && pool.length > 0) {
-    const index = hashToIndex(sessionId, pool.length);
+    const candidates = selectLeastUsedProxy(pool, reservedProxyUrls);
+    const index = hashToIndex(sessionId, candidates.length);
+    const proxyUrl = candidates[index];
     return {
-      proxyIndex: index,
-      proxySource: "pool",
-      proxyUrl: pool[index],
+      proxyIndex: pool.indexOf(proxyUrl),
+      proxySource: candidates.length === pool.length ? "pool" : "pool-free",
+      proxyUrl,
     };
   }
   return {
@@ -92,6 +99,13 @@ function describeProxySelection(selection) {
     Number.isInteger(selection.proxyIndex)
   ) {
     return `pool[${selection.proxyIndex}] ${proxyLabel}`;
+  }
+
+  if (
+    selection.proxySource === "pool-free" &&
+    Number.isInteger(selection.proxyIndex)
+  ) {
+    return `pool-free[${selection.proxyIndex}] ${proxyLabel}`;
   }
 
   if (selection.proxySource === "fallback") {
