@@ -2080,16 +2080,29 @@ async function clickBookPostAppointmentButton(page) {
 
 async function clickProceedButton(page) {
   const targetText = "SELECT POST AND PROCEED";
-  const clickedText = await clickExactActionButton(page, targetText, {
-    timeoutMs: 20000,
-  }).catch(() => null);
+  const maxAttempts = 3;
 
-  if (!clickedText) {
-    return false;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const remainingAttempts = maxAttempts - attempt - 1;
+    const clickedText = await clickExactActionButton(page, targetText, {
+      timeoutMs: attempt === 0 ? 20000 : 12000,
+    }).catch(() => null);
+
+    if (clickedText) {
+      status("PROCEED", `Clicked ${clickedText}`);
+      return true;
+    }
+
+    if (remainingAttempts > 0) {
+      status(
+        "PROCEED",
+        `No redirect after SELECT POST AND PROCEED click; retrying (${remainingAttempts} left)`,
+      );
+      await page.waitForTimeout(250).catch(() => {});
+    }
   }
 
-  status("PROCEED", `Clicked ${clickedText}`);
-  return true;
+  return false;
 }
 
 async function clickExactActionButton(
