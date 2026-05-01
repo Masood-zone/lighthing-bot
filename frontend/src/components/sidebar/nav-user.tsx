@@ -3,6 +3,7 @@ import {
   IconLogout,
   IconNotification,
 } from "@tabler/icons-react";
+import { useState } from "react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
@@ -21,9 +22,11 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { useUserStore } from "@/store/user-store";
+import { NotificationEmailModal } from "./notification-email-modal";
 
 export function NavUser() {
   const { user, logout } = useUserStore();
+  const [notificationOpen, setNotificationOpen] = useState(false);
 
   const { isMobile } = useSidebar();
 
@@ -83,7 +86,7 @@ export function NavUser() {
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuGroup>
-              <DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setNotificationOpen(true)}>
                 <IconNotification />
                 Notifications
               </DropdownMenuItem>
@@ -96,6 +99,10 @@ export function NavUser() {
           </DropdownMenuContent>
         </DropdownMenu>
       </SidebarMenuItem>
+      <NotificationEmailModal
+        open={notificationOpen}
+        onOpenChange={setNotificationOpen}
+      />
     </SidebarMenu>
   );
 }

@@ -2,6 +2,7 @@ import { useAnalyticsQueries } from "@/services/analytics/analytics-queries";
 import { AnalyticsSummaryCards } from "@/components/analytics/analytics-summary-cards";
 import { AnalyticsDashboardSkeleton } from "@/components/analytics/analytics-dashboard-skeleton";
 import { AdminsCard } from "@/components/analytics/admins-card";
+import { NotificationEmailCard } from "@/components/analytics/notification-email-card";
 import { VisaUsersStatusCard } from "@/components/analytics/visa-users-status-card";
 import { QueueCard } from "@/components/analytics/queue-card";
 import { RecentActivityCard } from "@/components/analytics/recent-activity-card";
@@ -54,6 +55,7 @@ export default function Dashboard() {
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <AdminsCard admins={data.admins.items} />
+            <NotificationEmailCard />
             <VisaUsersStatusCard visaUsers={data.visaUsers} />
             <QueueCard queue={data.queue} />
             <RecentActivityCard

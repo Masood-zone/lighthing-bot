@@ -74,10 +74,11 @@ function getSmtpTransportConfigFromEnv() {
 
 class EmailNotificationService {
   /**
-   * @param {{ adminRecipientStore: any, sessionStore?: any }} deps
+   * @param {{ adminRecipientStore: any, notificationStore?: any, sessionStore?: any }} deps
    */
-  constructor({ adminRecipientStore, sessionStore } = {}) {
+  constructor({ adminRecipientStore, notificationStore, sessionStore } = {}) {
     this.adminRecipientStore = adminRecipientStore;
+    this.notificationStore = notificationStore || null;
     this.sessionStore = sessionStore || null;
 
     this.queue = [];
@@ -194,6 +195,20 @@ class EmailNotificationService {
   }
 
   _getActiveRecipientEmails() {
+    if (this.notificationStore) {
+      const recipient =
+        typeof this.notificationStore.getRecipient === "function"
+          ? this.notificationStore.getRecipient()
+          : null;
+
+      const singleEmail = normalizeEmail(recipient?.email);
+      if (singleEmail && recipient?.active !== false) {
+        return [singleEmail];
+      }
+
+      return [];
+    }
+
     const list =
       this.adminRecipientStore &&
       typeof this.adminRecipientStore.listAdmins === "function"

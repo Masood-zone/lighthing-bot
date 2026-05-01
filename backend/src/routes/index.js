@@ -7,6 +7,7 @@ const { createSessionsRouter } = require("./sessions");
 const { createUsersRouter } = require("./users");
 const { createAnalyticsRouter } = require("./analytics");
 const { createAdministratorsRouter } = require("./administrators");
+const { createNotificationsRouter } = require("./notifications");
 
 function createRoutes(deps) {
   const root = express.Router();
@@ -22,6 +23,7 @@ function createRoutes(deps) {
   root.use("/api/analytics", createAnalyticsRouter(deps));
   root.use("/api/queue", createQueueRouter(deps));
   root.use("/api/administrators", createAdministratorsRouter(deps));
+  root.use("/api/notifications", createNotificationsRouter(deps));
   root.use("/api/users", createUsersRouter(deps));
   root.use("/api/sessions", createSessionsRouter(deps));
 

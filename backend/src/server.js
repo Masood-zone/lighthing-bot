@@ -14,6 +14,7 @@ const cors = require("cors");
 const { SessionStore } = require("./store/sessionStore");
 const { UserStore } = require("./store/userStore");
 const { AdminRecipientStore } = require("./store/adminRecipientStore");
+const { NotificationStore } = require("./store/notificationStore");
 const { WorkerPool } = require("./queue/workerPool");
 const { AuthService } = require("./services/authService");
 const { EmailNotificationService } = require("./services/notifications");
@@ -68,12 +69,17 @@ const adminRecipientStore = new AdminRecipientStore({
   dataDir: DATA_DIR,
   seedFilePath: path.join(BASE_DIR, "admins.json"),
 });
+const notificationStore = new NotificationStore({
+  dataDir: DATA_DIR,
+  seedFilePath: path.join(BASE_DIR, "notification-email.json"),
+});
 const authService = new AuthService({
   tokenTtlMs: Number(process.env.AUTH_TOKEN_TTL_MS || 1000 * 60 * 60 * 12),
 });
 
 const notificationService = new EmailNotificationService({
   adminRecipientStore,
+  notificationStore,
   sessionStore: store,
 });
 
@@ -112,6 +118,7 @@ app.use(
     profilesDir: PROFILES_DIR,
     userStore,
     adminRecipientStore,
+    notificationStore,
     authService,
     requireAuthMiddleware,
   }),
