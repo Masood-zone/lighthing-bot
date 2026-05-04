@@ -22,7 +22,7 @@ function assertSecretConfigured() {
   return secret;
 }
 
-function encryptPassword(plaintext) {
+function encryptSecret(plaintext) {
   const secret = assertSecretConfigured();
   const key = deriveKeyFromSecret(secret);
 
@@ -36,37 +36,70 @@ function encryptPassword(plaintext) {
   const tag = cipher.getAuthTag();
 
   return {
-    passwordEnc: ciphertext.toString("base64"),
-    passwordIv: iv.toString("base64"),
-    passwordTag: tag.toString("base64"),
+    enc: ciphertext.toString("base64"),
+    iv: iv.toString("base64"),
+    tag: tag.toString("base64"),
   };
 }
 
-function decryptPassword(config) {
+function decryptSecret({ enc, iv, tag, missingMessage }) {
   const secret = assertSecretConfigured();
   const key = deriveKeyFromSecret(secret);
 
-  const enc = config?.passwordEnc;
-  const ivB64 = config?.passwordIv;
-  const tagB64 = config?.passwordTag;
-  if (!enc || !ivB64 || !tagB64) {
-    const err = new Error("Encrypted password fields are missing.");
+  if (!enc || !iv || !tag) {
+    const err = new Error(missingMessage || "Encrypted fields are missing.");
     err.code = "PASSWORD_ENC_MISSING";
     throw err;
   }
 
-  const iv = Buffer.from(String(ivB64), "base64");
-  const tag = Buffer.from(String(tagB64), "base64");
+  const ivBuf = Buffer.from(String(iv), "base64");
+  const tagBuf = Buffer.from(String(tag), "base64");
   const ciphertext = Buffer.from(String(enc), "base64");
 
-  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAuthTag(tag);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, ivBuf);
+  decipher.setAuthTag(tagBuf);
 
   const plaintext = Buffer.concat([
     decipher.update(ciphertext),
     decipher.final(),
   ]);
   return plaintext.toString("utf8");
+}
+
+function encryptPassword(plaintext) {
+  const secret = encryptSecret(plaintext);
+  return {
+    passwordEnc: secret.enc,
+    passwordIv: secret.iv,
+    passwordTag: secret.tag,
+  };
+}
+
+function decryptPassword(config) {
+  return decryptSecret({
+    enc: config?.passwordEnc,
+    iv: config?.passwordIv,
+    tag: config?.passwordTag,
+    missingMessage: "Encrypted password fields are missing.",
+  });
+}
+
+function encryptProxyUrl(plaintext) {
+  const secret = encryptSecret(plaintext);
+  return {
+    proxyUrlEnc: secret.enc,
+    proxyUrlIv: secret.iv,
+    proxyUrlTag: secret.tag,
+  };
+}
+
+function decryptProxyUrl(config) {
+  return decryptSecret({
+    enc: config?.proxyUrlEnc,
+    iv: config?.proxyUrlIv,
+    tag: config?.proxyUrlTag,
+    missingMessage: "Encrypted proxy fields are missing.",
+  });
 }
 
 function isSecretConfigured() {
@@ -76,5 +109,7 @@ function isSecretConfigured() {
 module.exports = {
   encryptPassword,
   decryptPassword,
+  encryptProxyUrl,
+  decryptProxyUrl,
   isSecretConfigured,
 };

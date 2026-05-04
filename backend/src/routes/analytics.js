@@ -4,10 +4,15 @@ function sanitizeVisaUser(sessionLike) {
   if (!sessionLike) return sessionLike;
   const cfg = { ...(sessionLike.config || {}) };
   const passwordSet = Boolean(cfg.passwordEnc || cfg.password);
+  const proxySet = Boolean(cfg.proxyUrlEnc || cfg.proxyUrl);
   delete cfg.password;
   delete cfg.passwordEnc;
   delete cfg.passwordIv;
   delete cfg.passwordTag;
+  delete cfg.proxyUrl;
+  delete cfg.proxyUrlEnc;
+  delete cfg.proxyUrlIv;
+  delete cfg.proxyUrlTag;
 
   const timeline = {
     dateStart: cfg.dateStart ?? null,
@@ -22,6 +27,7 @@ function sanitizeVisaUser(sessionLike) {
     config: {
       ...cfg,
       passwordSet,
+      proxySet,
     },
     timeline,
   };

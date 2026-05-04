@@ -1,7 +1,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { encryptPassword } = require("../security/passwordCrypto");
+const {
+  encryptPassword,
+  encryptProxyUrl,
+} = require("../security/passwordCrypto");
 
 function nowIso() {
   return new Date().toISOString();
@@ -153,6 +156,9 @@ class SessionStore {
       ? globalThis.crypto.randomUUID()
       : require("node:crypto").randomUUID();
 
+    const proxyUrl =
+      typeof input.proxyUrl === "string" ? input.proxyUrl.trim() : "";
+
     const session = {
       id,
       createdAt: nowIso(),
@@ -186,6 +192,7 @@ class SessionStore {
         weeksFromNowMax:
           input.weeksFromNowMax === undefined ? null : input.weeksFromNowMax,
         ...encryptPassword(input.password),
+        ...(proxyUrl ? encryptProxyUrl(proxyUrl) : {}),
       },
       runtime: {
         pid: null,
@@ -252,6 +259,22 @@ class SessionStore {
         patch.weeksFromNowMax === undefined || patch.weeksFromNowMax === null
           ? null
           : patch.weeksFromNowMax;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "proxyUrl")) {
+      const proxyUrl =
+        typeof patch.proxyUrl === "string" ? patch.proxyUrl.trim() : "";
+
+      delete cfg.proxyUrl;
+      delete cfg.proxyUrlEnc;
+      delete cfg.proxyUrlIv;
+      delete cfg.proxyUrlTag;
+
+      if (proxyUrl) {
+        const enc = encryptProxyUrl(proxyUrl);
+        cfg.proxyUrlEnc = enc.proxyUrlEnc;
+        cfg.proxyUrlIv = enc.proxyUrlIv;
+        cfg.proxyUrlTag = enc.proxyUrlTag;
+      }
     }
     if (Object.prototype.hasOwnProperty.call(patch, "password")) {
       // store encrypted; never persist plaintext

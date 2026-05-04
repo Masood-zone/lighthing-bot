@@ -7,10 +7,15 @@ function sanitizeUser(sessionLike) {
   const cfg = { ...(sessionLike.config || {}) };
   cfg.reschedule = Boolean(cfg.reschedule);
   const passwordSet = Boolean(cfg.passwordEnc || cfg.password);
+  const proxySet = Boolean(cfg.proxyUrlEnc || cfg.proxyUrl);
   delete cfg.password;
   delete cfg.passwordEnc;
   delete cfg.passwordIv;
   delete cfg.passwordTag;
+  delete cfg.proxyUrl;
+  delete cfg.proxyUrlEnc;
+  delete cfg.proxyUrlIv;
+  delete cfg.proxyUrlTag;
 
   const timeline = {
     dateStart: cfg.dateStart ?? null,
@@ -25,6 +30,7 @@ function sanitizeUser(sessionLike) {
     config: {
       ...cfg,
       passwordSet,
+      proxySet,
     },
     timeline,
   };
@@ -116,6 +122,15 @@ function normalizeDatePrefs(body) {
   };
 }
 
+function normalizeNullableString(value) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "string") return "__invalid__";
+
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
 function createUsersRouter({ store, pool, baseDir, profilesDir }) {
   const router = express.Router();
 
@@ -158,6 +173,7 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
       headless = false,
       reschedule,
       autoStart,
+      proxyUrl,
     } = req.body || {};
 
     const defaultHeadless =
@@ -177,6 +193,7 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
         : queryAutoStart || envAutoStart;
 
     const rescheduleBool = reschedule === undefined ? false : reschedule;
+    const proxyUrlEffective = normalizeNullableString(proxyUrl);
 
     const {
       dateStart,
@@ -201,6 +218,9 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
     }
     if (rescheduleBool !== undefined && typeof rescheduleBool !== "boolean") {
       return res.status(400).json({ error: "reschedule_invalid" });
+    }
+    if (proxyUrlEffective === "__invalid__") {
+      return res.status(400).json({ error: "proxyUrl_invalid" });
     }
 
     if (dateStart === "__invalid__") {
@@ -268,6 +288,7 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
         daysFromNowMax,
         weeksFromNowMin,
         weeksFromNowMax,
+        proxyUrl: proxyUrlEffective,
       });
 
       if (autoStartEffective) {
@@ -313,6 +334,7 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
       pickupPoint,
       headless,
       reschedule,
+      proxyUrl,
     } = req.body || {};
 
     const {
@@ -323,6 +345,7 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
       weeksFromNowMin,
       weeksFromNowMax,
     } = normalizeDatePrefs(req.body);
+    const proxyUrlEffective = normalizeNullableString(proxyUrl);
 
     if (loginUrl !== undefined && (typeof loginUrl !== "string" || !loginUrl)) {
       return res.status(400).json({ error: "loginUrl_invalid" });
@@ -347,6 +370,9 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
     }
     if (reschedule !== undefined && typeof reschedule !== "boolean") {
       return res.status(400).json({ error: "reschedule_invalid" });
+    }
+    if (proxyUrlEffective === "__invalid__") {
+      return res.status(400).json({ error: "proxyUrl_invalid" });
     }
 
     if (dateStart === "__invalid__") {
@@ -415,6 +441,7 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
         ...(daysFromNowMax !== undefined ? { daysFromNowMax } : null),
         ...(weeksFromNowMin !== undefined ? { weeksFromNowMin } : null),
         ...(weeksFromNowMax !== undefined ? { weeksFromNowMax } : null),
+        ...(proxyUrl !== undefined ? { proxyUrl: proxyUrlEffective } : null),
       });
 
       return res.json({ ok: true, user: sanitizeUser(updated) });

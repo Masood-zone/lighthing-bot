@@ -1,11 +1,14 @@
+const fs = require("node:fs");
 const path = require("node:path");
 const { fork } = require("node:child_process");
 
 const {
+  decryptProxyUrl,
   decryptPassword,
   encryptPassword,
   isSecretConfigured,
 } = require("../security/passwordCrypto");
+const { Proxy11Rotator } = require("./proxy11Rotator");
 
 function nowIso() {
   return new Date().toISOString();
@@ -17,13 +20,66 @@ function readBoolEnv(name) {
   return v === "1" || String(v).toLowerCase() === "true";
 }
 
+function normalizeProxyUrl(raw) {
+  const trimmed = String(raw || "").trim();
+  if (!trimmed) return "";
+  if (/^[a-z]+:\/\//i.test(trimmed)) return trimmed;
+  return `http://${trimmed}`;
+}
+
 function parseProxyPool(value) {
   if (!value) return [];
-  // Entries are not validated here; invalid proxy URLs will be ignored by the worker.
   return String(value)
     .split(/[\n,;]+/)
     .map((entry) => entry.trim())
+    .filter((entry) => entry && !entry.startsWith("#"))
+    .map(normalizeProxyUrl)
     .filter(Boolean);
+}
+
+function readProxyPoolFile(filePath) {
+  if (!filePath) return [];
+
+  try {
+    if (!fs.existsSync(filePath)) return [];
+    const raw = fs.readFileSync(filePath, "utf8");
+    return parseProxyPool(raw);
+  } catch {
+    return [];
+  }
+}
+
+function resolveProxyPool(baseDir) {
+  const envPool = parseProxyPool(
+    process.env.VISA_PROXY_POOL || process.env.VISA_PROXY_URLS || "",
+  );
+  if (envPool.length > 0) {
+    return envPool;
+  }
+
+  const explicitFile = String(
+    process.env.VISA_PROXY_POOL_FILE || process.env.VISA_PROXY_URLS_FILE || "",
+  ).trim();
+
+  const candidateFiles = [];
+  if (explicitFile) {
+    candidateFiles.push(
+      path.isAbsolute(explicitFile)
+        ? explicitFile
+        : path.resolve(baseDir, explicitFile),
+    );
+  }
+
+  candidateFiles.push(path.join(baseDir, "data", "proxy-pool.txt"));
+
+  for (const filePath of candidateFiles) {
+    const pool = readProxyPoolFile(filePath);
+    if (pool.length > 0) {
+      return pool;
+    }
+  }
+
+  return [];
 }
 
 function hashToIndex(value, modulo) {
@@ -68,7 +124,17 @@ function selectProxySelection(
   pool,
   fallback,
   reservedProxyUrls = new Set(),
+  preferredProxyUrl = "",
 ) {
+  const sessionProxyUrl = normalizeProxyUrl(preferredProxyUrl);
+  if (sessionProxyUrl) {
+    return {
+      proxyIndex: null,
+      proxySource: "session",
+      proxyUrl: sessionProxyUrl,
+    };
+  }
+
   if (Array.isArray(pool) && pool.length > 0) {
     const candidates = selectLeastUsedProxy(pool, reservedProxyUrls);
     const index = hashToIndex(sessionId, candidates.length);
@@ -82,18 +148,35 @@ function selectProxySelection(
   return {
     proxyIndex: null,
     proxySource: fallback ? "fallback" : "none",
-    proxyUrl: fallback || "",
+    proxyUrl: normalizeProxyUrl(fallback) || "",
   };
 }
 
-function selectProxyUrl(sessionId, pool, fallback) {
-  return selectProxySelection(sessionId, pool, fallback).proxyUrl;
+function selectProxyUrl(sessionId, pool, fallback, preferredProxyUrl = "") {
+  return selectProxySelection(
+    sessionId,
+    pool,
+    fallback,
+    new Set(),
+    preferredProxyUrl,
+  ).proxyUrl;
 }
 
 function describeProxySelection(selection) {
   if (!selection?.proxyUrl) return "no proxy";
 
   const proxyLabel = describeProxyUrl(selection.proxyUrl);
+  if (
+    selection.proxySource === "proxy11" ||
+    selection.proxySource === "proxy11-reuse"
+  ) {
+    if (Number.isInteger(selection.proxyIndex)) {
+      return `proxy11[${selection.proxyIndex}] ${proxyLabel}`;
+    }
+
+    return `proxy11 ${proxyLabel}`;
+  }
+
   if (
     selection.proxySource === "pool" &&
     Number.isInteger(selection.proxyIndex)
@@ -106,6 +189,10 @@ function describeProxySelection(selection) {
     Number.isInteger(selection.proxyIndex)
   ) {
     return `pool-free[${selection.proxyIndex}] ${proxyLabel}`;
+  }
+
+  if (selection.proxySource === "session") {
+    return `session ${proxyLabel}`;
   }
 
   if (selection.proxySource === "fallback") {
@@ -215,45 +302,27 @@ class WorkerPool {
     this.baseDir = baseDir;
     this.profilesDir = profilesDir || path.join(this.baseDir, "profiles");
 
-    const proxyPoolRaw =
-      process.env.VISA_PROXY_POOL || process.env.VISA_PROXY_URLS || "";
-    this.proxyPool = parseProxyPool(proxyPoolRaw);
-    this.proxyFallback = String(
+    this.starting = new Set();
+    this.proxy11PoolLogged = false;
+    this.proxy11Rotator = new Proxy11Rotator({
+      baseUrl: process.env.PROXY_HOST || process.env.PROXY_API_URL || "",
+      apiKey: process.env.PROXY_API_KEY || process.env.PROXY11_API_KEY || "",
+      fallbackPort: process.env.PROXY_PORT || process.env.PROXY11_PORT || "",
+      maxEntries: 50,
+      refreshMs: Math.max(
+        60_000,
+        Number(process.env.PROXY_REFRESH_MS) || 10 * 60 * 1000,
+      ),
+      requestTimeoutMs: Math.max(
+        3000,
+        Number(process.env.PROXY_REQUEST_TIMEOUT_MS) || 15000,
+      ),
+    });
+
+    this.proxyPool = resolveProxyPool(this.baseDir);
+    this.proxyFallback = normalizeProxyUrl(
       process.env.VISA_PROXY_URL || process.env.VISA_PROXY_SERVER || "",
-    ).trim();
-
-    if (
-      this.proxyPool.length > 0 &&
-      this.maxConcurrent > 0 &&
-      this.proxyPool.length < this.maxConcurrent
-    ) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[WARN] VISA_PROXY_POOL has ${this.proxyPool.length} entries but MAX_CONCURRENT is ${this.maxConcurrent}; some sessions may still share a proxy/IP.`,
-      );
-    }
-
-    if (
-      this.maxConcurrent > 1 &&
-      this.proxyPool.length === 0 &&
-      this.proxyFallback
-    ) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[WARN] VISA_PROXY_URL is configured without VISA_PROXY_POOL; ${this.maxConcurrent} workers will reuse the same proxy/IP.`,
-      );
-    }
-
-    if (
-      this.maxConcurrent > 1 &&
-      this.proxyPool.length === 0 &&
-      !this.proxyFallback
-    ) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[WARN] No proxy pool configured; ${this.maxConcurrent} workers will use the local IP.`,
-      );
-    }
+    );
 
     this.notificationService = notificationService || null;
 
@@ -368,16 +437,38 @@ class WorkerPool {
   }
 
   _tick() {
-    while (this.active.size < this.maxConcurrent && this.queue.length > 0) {
-      const nextId = this.queue.shift();
-      if (!nextId) break;
-      this._startSession(nextId);
+    if (this.active.size + this.starting.size >= this.maxConcurrent) {
+      return;
     }
+
+    if (this.starting.size > 0) {
+      return;
+    }
+
+    const nextId = this.queue.shift();
+    if (!nextId) return;
+
+    this.starting.add(nextId);
+    void this._startSession(nextId)
+      .catch((err) => {
+        this.store.appendLog(
+          nextId,
+          "error",
+          `Worker start failed: ${String(err?.message || err)}`,
+        );
+      })
+      .finally(() => {
+        this.starting.delete(nextId);
+        this._tick();
+      });
   }
 
-  _startSession(sessionId) {
+  async _startSession(sessionId) {
     const session = this.store.getSession(sessionId);
     if (!session) return;
+    if (session.status === "STOPPED" || session.status === "BLOCKED") {
+      return;
+    }
 
     this.bookingContext.delete(sessionId);
     this.notifiedSuccess.delete(sessionId);
@@ -388,6 +479,7 @@ class WorkerPool {
     const profileDir = path.join(this.profilesDir, sessionId);
 
     let passwordPlain = "";
+    let sessionProxyUrl = "";
     try {
       if (session.config?.passwordEnc) {
         passwordPlain = decryptPassword(session.config);
@@ -406,19 +498,20 @@ class WorkerPool {
       } else {
         throw new Error("Session password is missing.");
       }
+
+      if (session.config?.proxyUrlEnc) {
+        sessionProxyUrl = decryptProxyUrl(session.config);
+      } else if (session.config?.proxyUrl) {
+        sessionProxyUrl = String(session.config.proxyUrl);
+      }
     } catch (err) {
       this.store.appendLog(
         sessionId,
         "error",
-        `Failed to prepare password for worker: ${String(err?.message || err)}`,
+        `Failed to prepare credentials for worker: ${String(err?.message || err)}`,
       );
-      this.store.setStatus(
-        sessionId,
-        "ERROR",
-        "Password encryption/decryption failed",
-      );
+      this.store.setStatus(sessionId, "ERROR", "Credential preparation failed");
       this.store.setQueueTimes(sessionId, { finishedAt: nowIso() });
-      this._tick();
       return;
     }
 
@@ -469,27 +562,91 @@ class WorkerPool {
       this.active,
       this.proxyAssignments,
     );
-    const proxySelection = selectProxySelection(
-      sessionId,
-      this.proxyPool,
-      this.proxyFallback,
-      reservedProxyUrls,
-    );
+    let proxySelection = await this.proxy11Rotator
+      .acquire({ sessionId, activeProxyUrls: reservedProxyUrls })
+      .catch(() => null);
+
+    const currentSession = this.store.getSession(sessionId);
+    if (!currentSession || currentSession.status === "STOPPED") {
+      return;
+    }
+
+    if (proxySelection?.proxyUrl) {
+      if (!this.proxy11PoolLogged) {
+        const summary =
+          proxySelection.poolSize >= this.maxConcurrent
+            ? `Proxy11 loaded ${proxySelection.poolSize} proxies for ${this.maxConcurrent} worker slot(s)`
+            : `Proxy11 loaded ${proxySelection.poolSize} proxy endpoint(s) for ${this.maxConcurrent} worker slot(s); some reuse may be required`;
+
+        this.store.appendLog(
+          sessionId,
+          proxySelection.poolSize >= this.maxConcurrent ? "info" : "warn",
+          summary,
+        );
+        this.proxy11PoolLogged = true;
+      }
+
+      if (proxySelection.proxySource === "proxy11-reuse") {
+        this.store.appendLog(
+          sessionId,
+          "warn",
+          `Proxy11 pool exhausted; reusing ${describeProxySelection(proxySelection)}`,
+        );
+      } else {
+        this.store.appendLog(
+          sessionId,
+          "info",
+          `Assigned ${describeProxySelection(proxySelection)}`,
+        );
+      }
+    } else {
+      const proxy11Status = this.proxy11Rotator.getStatus();
+      if (proxy11Status.configured && proxy11Status.lastError) {
+        this.store.appendLog(
+          sessionId,
+          "warn",
+          `Proxy11 rotator unavailable: ${proxy11Status.lastError}`,
+        );
+      }
+
+      proxySelection = sessionProxyUrl
+        ? {
+            proxyUrl: sessionProxyUrl,
+            proxyIndex: null,
+            proxySource: "session",
+          }
+        : selectProxySelection(
+            sessionId,
+            this.proxyPool,
+            this.proxyFallback,
+            reservedProxyUrls,
+            sessionProxyUrl,
+          );
+
+      if (proxySelection?.proxyUrl) {
+        this.store.appendLog(
+          sessionId,
+          "info",
+          `Assigned ${describeProxySelection(proxySelection)}`,
+        );
+      }
+    }
+
     const proxyUrl = proxySelection.proxyUrl;
     this.proxyAssignments.set(sessionId, proxySelection);
     if (proxyUrl) {
       env.VISA_PROXY_URL = proxyUrl;
-      this.store.appendLog(
-        sessionId,
-        "info",
-        `Assigned proxy ${describeProxySelection(proxySelection)}`,
-      );
     } else {
       this.store.appendLog(
         sessionId,
         "warn",
         "No proxy configured for this session; it will use the local IP",
       );
+    }
+
+    const launchSession = this.store.getSession(sessionId);
+    if (!launchSession || launchSession.status === "STOPPED") {
+      return;
     }
 
     const child = fork(this.workerEntry, [], {

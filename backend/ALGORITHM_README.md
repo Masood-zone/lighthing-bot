@@ -21,16 +21,23 @@ This file documents the _actual runtime algorithm_ executed by the Selenium work
 - `VISA_HEADLESS` — `true|false`
 - `VISA_PROFILE_DIR` — Chrome user-data-dir path (set by the server per session)
 - `VISA_SESSION_ID` — used for backend logs/status association
+- `PROXY_HOST` / `PROXY_API_KEY` — Proxy11 rotator API endpoint and key used to fetch the proxy list
+- `PROXY_PORT` — optional fallback port when the API response omits a port value
 - `VISA_PROXY_URL` — optional proxy for a worker (format: `http[s]://user:pass@host:port` or `socks5://host:port`)
-- `VISA_PROXY_POOL` — optional comma/newline-separated list of proxy URLs; the backend assigns one per session deterministically
+- `VISA_PROXY_POOL` — legacy fallback comma/newline-separated list of proxy URLs
+- `VISA_PROXY_POOL_FILE` — legacy fallback path to a text file with one proxy URL per line
 - `VISA_PROXY_BYPASS` — optional bypass list passed to Playwright (comma-separated host globs)
 
-For Oxylabs testing, put one full proxy URL per worker session into `VISA_PROXY_POOL`. For example, you can list distinct Oxylabs gateway URLs on separate lines, such as `http://user:pass@dc.oxylabs.io:8000` or `http://user:pass@pr.oxylabs.io:7777` when your account is provisioned for that endpoint.
+Proxy11 is now the primary rotator. On worker start, the backend requests `PROXY_HOST?key=PROXY_API_KEY`, reads up to 50 proxy records from the response, and assigns one proxy per active session before Chrome launches. Each worker gets a distinct `VISA_PROXY_URL` like `http://185.238.228.22:80` and the assignment is logged.
 
-The backend logs which pool entry was assigned to each session using a sanitized proxy label and short fingerprint. That lets you verify that concurrent browser sessions are being spread across different proxy entries without exposing credentials in the logs.
+If you prefer to manage the pool outside the environment file, the legacy `backend/data/proxy-pool.txt` fallback is still supported when Proxy11 is unavailable.
 
-When multiple sessions run at once, `VISA_PROXY_POOL` is the setting that spreads them across different IPs. `VISA_PROXY_URL` is a single-proxy fallback and will still send every session through the same IP if the pool is not configured.
-For best isolation, keep the proxy pool at least as large as `MAX_CONCURRENT`; otherwise the hash-based assignment can still place multiple sessions on the same proxy.
+Individual sessions may also carry a stored `proxyUrl` override. When present and Proxy11 is unavailable, that worker can still use the stored proxy directly.
+
+The backend logs which Proxy11 entry was assigned to each session using a sanitized proxy label and short fingerprint. That lets you verify that concurrent browser sessions are being spread across different proxy entries without exposing credentials in the logs.
+
+When multiple sessions run at once, Proxy11 is the setting that spreads them across different IPs. `VISA_PROXY_URL` is now only a single-proxy fallback and will still send every session through the same IP if Proxy11 and the legacy pool are not configured.
+For best isolation, keep the Proxy11 response set at least as large as `MAX_CONCURRENT`; otherwise the rotator may eventually reuse an IP when all available proxies are already reserved.
 
 ### Date-range filtering (green dates must be inside this window)
 
