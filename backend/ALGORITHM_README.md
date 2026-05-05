@@ -1,13 +1,14 @@
-# Visa Booking Bot — Algorithm (Selenium Worker)
+# Visa Booking Bot — Algorithm (Automation Worker)
 
-This file documents the _actual runtime algorithm_ executed by the Selenium worker and how it interacts with the backend.
+This file documents the _actual runtime algorithm_ executed by the automation worker and how it interacts with the backend.
 
 ## Files involved
 
 - API server: `backend/src/server.js`
 - Worker pool (forks workers, receives statuses): `backend/src/queue/workerPool.js`
 - Worker entry (fork target): `backend/src/workerEntry.js`
-- Selenium worker (the algorithm): `backend/main/visa-bot.js`
+- Automation worker (the algorithm): `backend/main/index.js`
+- CAPTCHA solver module: `backend/main/captcha-solver.js`
 - Admin email notifications: `backend/src/services/notifications.js`
 
 ## Configuration inputs (what controls behavior)
@@ -21,6 +22,9 @@ This file documents the _actual runtime algorithm_ executed by the Selenium work
 - `VISA_HEADLESS` — `true|false`
 - `VISA_PROFILE_DIR` — Chrome user-data-dir path (set by the server per session)
 - `VISA_SESSION_ID` — used for backend logs/status association
+- `RECAPTCHA_API_KEY` — 2Captcha API key for automated CAPTCHA solving
+- `RECAPTCHA_SITE_KEY` — Optional override for the reCAPTCHA site key (auto-detected if not set)
+- `RECAPTCHA_SITE_URL` — The login page URL where CAPTCHA appears
 - `PROXY_HOST` / `PROXY_API_KEY` — Proxy11 rotator API endpoint and key used to fetch the proxy list
 - `PROXY_PORT` — optional fallback port when the API response omits a port value
 - `VISA_PROXY_URL` — optional proxy for a worker (format: `http[s]://user:pass@host:port` or `socks5://host:port`)
@@ -51,9 +55,9 @@ Fallback:
 
 ### Attempt pacing / rate limiting
 
-- `VISA_ATTEMPT_INTERVAL_MS` (default: `2000`)
-- `VISA_ATTEMPT_WINDOW_MS` (default: `60*60*1000`)
-- `VISA_ATTEMPTS_PER_WINDOW` (default: `1800`)
+- `VISA_ATTEMPT_INTERVAL_MS` (default: `300`)
+- `VISA_ATTEMPT_BURST_INTERVAL_MS` (default: `250`)
+- `VISA_CALENDAR_MAX_MONTHS` (default: `6`)
 
 ### Server-side worker capacity
 
@@ -66,14 +70,22 @@ Fallback:
 
 1. Backend starts (`backend/src/server.js`).
 2. `WorkerPool` forks `backend/src/workerEntry.js` for a session.
-3. Worker entry loads the algorithm (`require("../main/visa-bot")`).
+3. Worker entry loads the algorithm (`require("../main/index")`).
 
-### 2) Login (worker)
+### 2) Login (worker) — Fully Automated
 
 1. Worker opens Chrome and navigates to `VISA_PLATFORM_URL`.
 2. Worker fills email + password.
-3. Human solves CAPTCHA and clicks **SIGN IN**.
-4. Worker waits until dashboard is detected.
+3. **Automated CAPTCHA Solving:**
+   - Worker detects the reCAPTCHA on the login page.
+   - Worker extracts the site key from the page DOM.
+   - Worker sends the CAPTCHA to 2Captcha service via the `@2captcha/captcha-solver` package.
+   - 2Captcha returns a solved token (typically within 15-45 seconds).
+   - Worker injects the token into the page's reCAPTCHA response field.
+   - Worker triggers the reCAPTCHA callback to activate the Sign In button.
+4. Worker clicks the **SIGN IN** button automatically.
+5. Worker waits until dashboard is detected.
+6. **Fallback:** If 2Captcha solving fails (API error, timeout, etc.), the worker logs the error and falls back to the manual CAPTCHA wait state, allowing human intervention.
 
 ### 3) Navigate to appointment booking page
 
@@ -90,34 +102,31 @@ Fallback:
 
 ### 4) Monitoring loop (repeats until booked)
 
-The main loop is `appointmentWatcher()`.
+The main loop is in the `main()` function.
 
 On each cycle:
 
-1. Ensure the browser is on the booking page (`.ofc-book-slot-block` exists). If not, navigate there (this navigation is **not** counted as an attempt).
-2. Enforce rate limits: only `VISA_ATTEMPTS_PER_WINDOW` attempts per `VISA_ATTEMPT_WINDOW_MS`.
-3. Every `VISA_ATTEMPT_INTERVAL_MS`, run one `fastBookingAttempt()`.
-4. If `fastBookingAttempt()` returns `SUCCESS`, emit `COMPLETED` and stop.
-
-Important: the worker does **not** auto-refresh. It stabilizes by waiting for overlays/spinners and dismissing overlays.
+1. Run `attemptBooking()`.
+2. If it returns `"done"`, emit `SUCCESS` / `COMPLETED` and stop.
+3. Sleep for `VISA_ATTEMPT_INTERVAL_MS` (idle) or `VISA_BURST_INTERVAL_MS` (other outcomes).
 
 ### Recovery behaviors (built-in)
 
-- White/blank page guard: if navigation leads to `about:blank` / `chrome-error://` / near-empty DOM, the worker navigates back to the appointment page and retries.
-- Closed/crashed Chrome window: the worker recreates the driver and restarts login.
-- Long waits (rate limit): the worker uses a keep-alive sleep loop to periodically check session state and dismiss overlays.
+- Calendar not ready: worker skips the scan and retries on the next loop iteration.
+- Slot not found: worker advances to the next available date or month.
+- Pickup refresh: when no usable dates are found after consecutive attempts, the worker toggles the pickup selection to refresh availability data from the server.
+- Throttled pickup refresh: enforced by `VISA_PICKUP_REFRESH_COOLDOWN_MS` and `VISA_PICKUP_REFRESH_AFTER_MISSES`.
 
-## fastBookingAttempt() (the booking attempt algorithm)
+## attemptBooking() (the booking attempt algorithm)
 
-### A) Applicant checkbox (PENDING mode only)
+### A) Open appointment mode
 
-- If `VISA_RESCHEDULE=false`, the worker checks the **Applicant List** checkbox as early as possible.
-- Checkbox logic targets `input[id^='styled-checkbox-']` and has fallbacks if the input is visually hidden.
+- Navigate to the booking UI based on `VISA_RESCHEDULE` mode.
 
-### B) Pickup selection (select once)
+### B) Pickup selection (PENDING mode only)
 
-- Pickup is selected only if it is not already set to `VISA_PICKUP_POINT`.
-- Once the worker is past the calendar stage (a date is selected or “Available Slot(s)” is visible), pickup is **not** reselected.
+- Select the configured `VISA_PICKUP_POINT` from the dropdown.
+- In RESCHEDULE mode, pickup selection is skipped (the existing appointment's pickup is used).
 
 ### C) Green date scanning (within date range)
 
@@ -125,47 +134,43 @@ Worker scans the visible Angular Material calendar.
 
 Rules:
 
-- A date is “available” only if it is visually green (the availability green color).
+- A date is "available" only if it is visually green (the availability green color `#14a38b`).
 - A green date is clickable only if it is within `VISA_MIN_DATE..VISA_MAX_DATE` (or fallback range).
-- Clicking is done in the browser context and then confirmed (selected classes / `aria-pressed`).
+- Clicking is done in the browser context and the worker verifies the date was selected.
 
-If multiple in-range green dates exist, the worker tries them one-by-one until “Available Slot(s)” appears.
+If multiple in-range green dates exist, the worker selects the earliest one.
 
 ### D) Time slot selection
 
-- The worker selects the first enabled time-slot button/link that looks like a time (example: `3:30 PM`).
-- If a second list appears after clicking proceed, it selects again.
+- The worker waits briefly for time slots to load.
+- The worker selects the earliest enabled time-slot button that looks like a time (example: `3:30 PM`).
 
-### E) Proceed
+### E) Applicant checkbox
 
-- The worker clicks either:
-  - **SELECT POST AND PROCEED**, or
-  - **BOOK POST APPOINTMENT**
+- Worker rechecks the **Applicant List** checkbox before the final action.
+- Checkbox logic targets the `Applicant List` area and has multiple fallback click paths.
 
-It waits for loading overlays and handles new windows if one opens.
+### F) Final action
 
-### F) Final confirmation (only then SUCCESS)
+- **PENDING mode:** Clicks **SELECT POST AND PROCEED**.
+- **RESCHEDULE mode:** Clicks **BOOK POST APPOINTMENT**.
+- Worker waits for the booking success toast or a page redirect.
+
+### G) Final confirmation (only then SUCCESS)
 
 The worker does **not** claim success just because it progressed.
 
-Finalization is `finalizeBookingAndConfirm()`:
+Success is determined by:
 
-1. Detect success signals (preferred):
-   - landed on `/dashboard`, or
-   - landed on `/home/appointment/myappointment`, or
-   - a success dialog/snackbar/alert contains “appointment booked/confirmed”.
-2. If not confirmed yet, click a final **Confirm/Book/Submit** action:
-   - dialog buttons first (Angular Material dialogs)
-   - then page-level Confirm/Book/Submit buttons
-3. Safety rules:
-   - it avoids “YES/OK” unless the dialog looks booking-related
-   - it will not confirm cancellation dialogs
+1. Detecting the "Appointment Booked Successfully" toast message.
+2. The toast must remain visible for a minimum duration to avoid false positives.
+3. If the "Select a applicant" toast appears instead, the worker resets the checkbox and retries.
 
-Only after success is detected does `fastBookingAttempt()` return `SUCCESS`.
+Only after success is detected does `attemptBooking()` return `"done"`.
 
 ## How admin notification happens
 
-- Worker sends statuses via IPC: `reportStatus(state, message)`.
+- Worker sends statuses via IPC: `sendWorkerMessage()`.
 - Backend receives them in `WorkerPool`.
 
 Key states:
@@ -174,22 +179,33 @@ Key states:
 - `SLOT_SELECTED` — backend extracts the time slot for the email.
 - `COMPLETED` — backend marks the session completed and queues admin email notification.
 
-## Update cross-references (recent behavior changes)
+## CAPTCHA Solving Architecture
 
-These are the main algorithm updates that change runtime behavior:
+### Components
 
-- Stable pickup behavior (“select once”):
-  - `backend/main/visa-bot.js` → `triggerPickupCheck()` (no forced reselect)
-  - `backend/main/visa-bot.js` → `fastBookingAttempt()` avoids pickup changes once date/slots stage is reached
+- **2Captcha Service:** Third-party CAPTCHA solving service.
+- **`@2captcha/captcha-solver` npm package:** Official 2Captcha Node.js SDK.
+- **`captcha-solver.js` module:** Custom wrapper with error handling and result reporting.
 
-- Green-date click reliability:
-  - `backend/main/visa-bot.js` → `findGreenAvailableDateWithinRange()` (browser-context scan + click + confirm)
+### Flow
 
-- Applicant checkbox timing:
-  - `backend/main/visa-bot.js` → `fastBookingAttempt()` checks applicant early in PENDING mode
-  - `backend/main/visa-bot.js` → `confirmApplicant()` targets `styled-checkbox-*` with fallbacks
+1. **Detection:** Worker identifies reCAPTCHA on the login page by searching for the site key in script tags and DOM elements.
+2. **Submission:** Site key and page URL are sent to 2Captcha.
+3. **Polling:** 2Captcha workers solve the CAPTCHA (typically 15-45 seconds).
+4. **Response:** Solved token is returned.
+5. **Injection:** Token is injected into the `g-recaptcha-response` field and the reCAPTCHA callback is triggered.
+6. **Login:** Sign In button becomes active; worker clicks it.
 
-- Completion semantics tightened (emails are not premature):
-  - `backend/main/visa-bot.js` → `finalizeBookingAndConfirm()` must confirm success before returning `SUCCESS`
-  - `backend/main/visa-bot.js` → `appointmentWatcher()` emits `COMPLETED` only when `fastBookingAttempt()` returns `SUCCESS`
-  - `backend/src/queue/workerPool.js` → `COMPLETED` triggers admin email via `enqueueBookingSuccess()`
+### Error Handling
+
+- **API errors:** Logged and worker falls back to manual CAPTCHA wait state.
+- **Timeouts:** Worker waits up to 120 seconds for 2Captcha; if exceeded, falls back.
+- **Invalid tokens:** Worker can report incorrect solutions back to 2Captcha for refunds.
+
+### Environment Configuration
+
+```env
+RECAPTCHA_API_KEY=your_2captcha_api_key_here
+RECAPTCHA_SITE_KEY=optional_override
+RECAPTCHA_SITE_URL=https://www.usvisaappt.com/visaapplicantui/login
+```

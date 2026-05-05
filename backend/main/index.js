@@ -1,4 +1,5 @@
 const { chromium } = require("playwright");
+const CaptchaSolver = require("./captcha-solver");
 
 try {
   // eslint-disable-next-line global-require
@@ -6,6 +7,8 @@ try {
 } catch {
   // ignore
 }
+
+const captchaSolver = new CaptchaSolver(process.env.RECAPTCHA_API_KEY);
 
 function monthKey({ monthIndex, year }) {
   return year * 12 + monthIndex;
@@ -40,6 +43,12 @@ async function getCalendarMonthYear(page) {
   return { monthIndex, year };
 }
 
+function readBoolEnv(name) {
+  const value = process.env[name];
+  if (value === undefined) return undefined;
+  return value === "1" || String(value).toLowerCase() === "true";
+}
+
 const CONFIG = {
   PLATFORM_URL:
     process.env.VISA_PLATFORM_URL ||
@@ -69,6 +78,10 @@ const CONFIG = {
   LOGIN_NAV_TIMEOUT_MS: Math.max(
     120_000,
     Number(process.env.VISA_LOGIN_NAV_TIMEOUT_MS) || 3 * 60 * 1000,
+  ),
+  LOGIN_FORM_READY_TIMEOUT_MS: Math.max(
+    15_000,
+    Number(process.env.VISA_LOGIN_FORM_READY_TIMEOUT_MS) || 45_000,
   ),
   PROFILE_DIR: process.env.VISA_PROFILE_DIR || "",
   HOT_SCAN_SETTLE_MS: Math.max(
@@ -111,6 +124,14 @@ const CONFIG = {
     0,
     Number(process.env.VISA_HOT_FINAL_BURST_DELAY_MS) || 10,
   ),
+  RECAPTCHA_SITE_KEY: process.env.RECAPTCHA_SITE_KEY || "",
+  DEFER_PROXY_UNTIL_AFTER_LOGIN:
+    readBoolEnv("VISA_DEFER_PROXY_UNTIL_AFTER_LOGIN") ??
+    Boolean(
+      String(
+        process.env.VISA_PROXY_URL || process.env.VISA_PROXY_SERVER || "",
+      ).trim() && String(process.env.VISA_PROFILE_DIR || "").trim(),
+    ),
   PROXY_URL: process.env.VISA_PROXY_URL || process.env.VISA_PROXY_SERVER || "",
   PROXY_BYPASS: process.env.VISA_PROXY_BYPASS || "",
 };
@@ -405,10 +426,10 @@ function buildProxyConfig() {
   }
 }
 
-async function launchBrowser() {
+async function launchBrowser({ useProxy = true } = {}) {
   status(
     "BROWSER",
-    `${CONFIG.HEADLESS ? "Headless" : "Headed"} Chrome${CONFIG.PROFILE_DIR ? " with persistent profile" : ""}`,
+    `${CONFIG.HEADLESS ? "Headless" : "Headed"} Chrome${CONFIG.PROFILE_DIR ? " with persistent profile" : ""}${!useProxy && CONFIG.PROXY_URL ? " (proxy deferred until after login)" : ""}`,
   );
 
   const launchOptions = {
@@ -432,10 +453,12 @@ async function launchBrowser() {
     ],
   };
 
-  const proxyConfig = buildProxyConfig();
+  const proxyConfig = useProxy ? buildProxyConfig() : null;
   if (proxyConfig) {
     launchOptions.proxy = proxyConfig;
     status("BROWSER", "Proxy configured for this session");
+  } else if (!useProxy && CONFIG.PROXY_URL) {
+    status("BROWSER", "Direct login phase; proxy will be attached after login");
   }
 
   if (CONFIG.PROFILE_DIR) {
@@ -459,6 +482,59 @@ async function launchBrowser() {
   page.setDefaultTimeout(15000);
   page.setDefaultNavigationTimeout(CONFIG.LOGIN_NAV_TIMEOUT_MS);
   return { browser, context, page };
+}
+
+async function closeBrowserArtifacts(browser, context) {
+  if (context) await context.close().catch(() => {});
+  if (browser) await browser.close().catch(() => {});
+}
+
+async function switchBrowserToProxyAfterLogin(browserState) {
+  const { browser, context, page } = browserState;
+
+  if (!CONFIG.DEFER_PROXY_UNTIL_AFTER_LOGIN || !CONFIG.PROXY_URL) {
+    return browserState;
+  }
+
+  if (!CONFIG.PROFILE_DIR) {
+    status(
+      "PROXY_SWITCH",
+      "Deferred proxy mode requires a persistent profile; keeping the direct login browser",
+    );
+    return browserState;
+  }
+
+  status(
+    "PROXY_SWITCH",
+    "Login complete; relaunching browser with proxy for booking",
+  );
+
+  const proxiedBrowserState = await launchBrowser({ useProxy: true });
+
+  try {
+    await goToDashboard(proxiedBrowserState.page);
+    await waitForLoginOrDashboard(
+      proxiedBrowserState.page,
+      Math.min(CONFIG.LOGIN_WAIT_TIMEOUT_MS, 30_000),
+    );
+
+    await closeBrowserArtifacts(browser, context);
+
+    status("PROXY_SWITCH", "Proxy browser ready after login");
+    return proxiedBrowserState;
+  } catch (error) {
+    await closeBrowserArtifacts(
+      proxiedBrowserState.browser,
+      proxiedBrowserState.context,
+    );
+
+    status(
+      "PROXY_SWITCH_ERROR",
+      `Proxy relaunch failed after login; keeping the direct browser (${String(error?.message || error)})`,
+    );
+
+    return browserState;
+  }
 }
 
 async function waitForLoginSurface(
@@ -527,6 +603,411 @@ async function waitForLoginOrDashboard(
   return true;
 }
 
+async function waitForLoginFormReady(
+  page,
+  timeoutMs = CONFIG.LOGIN_FORM_READY_TIMEOUT_MS,
+) {
+  await page.waitForLoadState("load", { timeout: timeoutMs }).catch(() => {});
+
+  const usernameField = page
+    .locator('input[formcontrolname="username"]')
+    .first();
+  const passwordField = page
+    .locator('input[formcontrolname="password"]')
+    .first();
+  const submitButton = page
+    .locator(
+      'button[type="submit"], button:has-text("Sign In"), input[type="submit"]',
+    )
+    .first();
+
+  const start = Date.now();
+  let readyStreak = 0;
+
+  while (Date.now() - start < timeoutMs) {
+    // eslint-disable-next-line no-await-in-loop
+    const readyState = await page
+      .evaluate(() => document.readyState)
+      .catch(() => "");
+    // eslint-disable-next-line no-await-in-loop
+    const usernameReady = await usernameField.isVisible().catch(() => false);
+    // eslint-disable-next-line no-await-in-loop
+    const passwordReady = await passwordField.isVisible().catch(() => false);
+    // eslint-disable-next-line no-await-in-loop
+    const submitVisible = await submitButton.isVisible().catch(() => false);
+    // eslint-disable-next-line no-await-in-loop
+    const submitEnabled = submitVisible
+      ? await submitButton.isEnabled().catch(() => false)
+      : false;
+
+    if (
+      readyState === "complete" &&
+      usernameReady &&
+      passwordReady &&
+      submitEnabled
+    ) {
+      readyStreak += 1;
+      if (readyStreak >= 2) {
+        await page.waitForTimeout(250).catch(() => {});
+        return true;
+      }
+    } else {
+      readyStreak = 0;
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    await page.waitForTimeout(250).catch(() => {});
+  }
+
+  return false;
+}
+
+async function waitForCaptchaWidgetReady(
+  page,
+  timeoutMs = CONFIG.LOGIN_FORM_READY_TIMEOUT_MS,
+) {
+  const start = Date.now();
+  let readyStreak = 0;
+
+  const hasVisibleCaptchaWidget = async () =>
+    page
+      .evaluate(() => {
+        const isVisible = (element) => {
+          if (!element) return false;
+
+          const style = window.getComputedStyle(element);
+          if (
+            !style ||
+            style.display === "none" ||
+            style.visibility === "hidden" ||
+            Number(style.opacity || "1") === 0
+          ) {
+            return false;
+          }
+
+          const rect = element.getBoundingClientRect();
+          return rect.width >= 20 && rect.height >= 20;
+        };
+
+        const iframeSelectors =
+          'iframe[src*="recaptcha"], iframe[title*="reCAPTCHA"], iframe[title*="Google reCAPTCHA"]';
+        const widgetContainers = Array.from(
+          document.querySelectorAll(
+            "[data-sitekey], .g-recaptcha, .ngx-captcha",
+          ),
+        );
+
+        const visibleIframe = Array.from(
+          document.querySelectorAll(iframeSelectors),
+        ).find(isVisible);
+        if (visibleIframe) {
+          return true;
+        }
+
+        return widgetContainers.some(
+          (container) =>
+            isVisible(container) && container.querySelector(iframeSelectors),
+        );
+      })
+      .catch(() => false);
+
+  while (Date.now() - start < timeoutMs) {
+    // eslint-disable-next-line no-await-in-loop
+    const widgetReady = await hasVisibleCaptchaWidget();
+
+    if (widgetReady) {
+      readyStreak += 1;
+      if (readyStreak >= 2) {
+        await page.waitForTimeout(250).catch(() => {});
+        return true;
+      }
+    } else {
+      readyStreak = 0;
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    await page.waitForTimeout(250).catch(() => {});
+  }
+
+  return false;
+}
+
+async function solveAndSubmitCaptcha(page) {
+  try {
+    status(
+      "FORM_READY",
+      "Waiting for the login form and captcha widgets to finish loading...",
+    );
+
+    const formReady = await waitForLoginFormReady(page);
+    if (!formReady) {
+      throw new Error(
+        "Login form did not finish loading before verification could start.",
+      );
+    }
+
+    status(
+      "CAPTCHA_READY",
+      "Waiting for the captcha widget to fully render before reading the key...",
+    );
+
+    const captchaReady = await waitForCaptchaWidgetReady(page);
+    if (!captchaReady) {
+      throw new Error(
+        "Captcha widget did not finish loading before verification could start.",
+      );
+    }
+
+    status("VERIFICATION", "Starting automated form verification...");
+
+    const siteKey = await page.evaluate((fallbackSiteKey) => {
+      const scripts = Array.from(document.getElementsByTagName("script"));
+      for (const script of scripts) {
+        const src = script.src || "";
+        const match = src.match(/[?&]k=([^&]+)/);
+        if (match) {
+          return decodeURIComponent(match[1]);
+        }
+      }
+
+      const elements = document.querySelectorAll("[data-sitekey]");
+      if (elements.length > 0) {
+        const dataSiteKey = elements[0].getAttribute("data-sitekey");
+        if (dataSiteKey) {
+          return dataSiteKey;
+        }
+      }
+
+      return fallbackSiteKey || "";
+    }, CONFIG.RECAPTCHA_SITE_KEY);
+
+    if (!siteKey) {
+      throw new Error("Could not find form verification key");
+    }
+
+    console.log(`[VERIFICATION] Found site key: ${siteKey}`);
+
+    const browserUserAgent = await page.evaluate(() => navigator.userAgent);
+
+    const result = await captchaSolver.solveRecaptcha(siteKey, page.url(), {
+      invisible: 0,
+      version: "v2",
+      userAgent: browserUserAgent,
+    });
+
+    if (!result.success) {
+      throw new Error(`Form verification processing failed: ${result.error}`);
+    }
+
+    console.log(
+      "[VERIFICATION] Received verification token, applying to form...",
+    );
+
+    const verificationState = await page.evaluate((token) => {
+      const setNativeValue = (element, value) => {
+        const prototype =
+          element instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype
+            : HTMLInputElement.prototype;
+        const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+
+        if (descriptor?.set) {
+          descriptor.set.call(element, value);
+          return;
+        }
+
+        element.value = value;
+      };
+
+      const responseField =
+        document.getElementById("g-recaptcha-response") ||
+        document.querySelector('textarea[name="g-recaptcha-response"]') ||
+        document.querySelector('input[name="g-recaptcha-response"]');
+
+      if (responseField) {
+        setNativeValue(responseField, token);
+        responseField.dispatchEvent(new Event("input", { bubbles: true }));
+        responseField.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+
+      const collectCallbacks = (root, seen = new Set(), callbacks = []) => {
+        if (!root || typeof root !== "object" || seen.has(root)) {
+          return callbacks;
+        }
+
+        seen.add(root);
+
+        for (const [key, value] of Object.entries(root)) {
+          if (typeof value === "function" && /callback|success/i.test(key)) {
+            callbacks.push({ key, callback: value });
+            continue;
+          }
+
+          if (value && typeof value === "object") {
+            collectCallbacks(value, seen, callbacks);
+          }
+        }
+
+        return callbacks;
+      };
+
+      let callbackTriggered = false;
+      const clients = window.___grecaptcha_cfg?.clients || {};
+
+      for (const client of Object.values(clients)) {
+        const callbacks = collectCallbacks(client);
+
+        for (const { callback } of callbacks) {
+          try {
+            callback(token);
+            callbackTriggered = true;
+            break;
+          } catch {
+            continue;
+          }
+        }
+
+        if (callbackTriggered) {
+          break;
+        }
+      }
+
+      let angularHandled = false;
+      if (!callbackTriggered) {
+        const angularRoots = Array.from(
+          document.querySelectorAll(
+            "ngx-recaptcha2, [formcontrolname='recaptcha'], [ng-reflect-form-control-name='recaptcha'], form, body",
+          ),
+        );
+
+        const findAngularComponent = (root, seen = new Set(), depth = 0) => {
+          if (
+            !root ||
+            typeof root !== "object" ||
+            seen.has(root) ||
+            depth > 8
+          ) {
+            return null;
+          }
+
+          seen.add(root);
+
+          if (
+            typeof root.handleSuccess === "function" &&
+            root.loginForm?.controls?.recaptcha
+          ) {
+            return root;
+          }
+
+          for (const value of Object.values(root)) {
+            if (value && typeof value === "object") {
+              const found = findAngularComponent(value, seen, depth + 1);
+              if (found) {
+                return found;
+              }
+            }
+          }
+
+          return null;
+        };
+
+        for (const element of angularRoots) {
+          const angularContext = element.__ngContext__;
+          if (!angularContext) {
+            continue;
+          }
+
+          const component = findAngularComponent(angularContext);
+          if (!component) {
+            continue;
+          }
+
+          try {
+            component.handleSuccess(token);
+            angularHandled = true;
+            break;
+          } catch (error) {
+            const recaptchaControl = component.loginForm?.controls?.recaptcha;
+            if (recaptchaControl?.setValue) {
+              try {
+                recaptchaControl.setValue(token);
+                angularHandled = true;
+                break;
+              } catch {
+                continue;
+              }
+            }
+          }
+        }
+      }
+
+      const grecaptchaResponse =
+        typeof grecaptcha !== "undefined" &&
+        typeof grecaptcha.getResponse === "function"
+          ? grecaptcha.getResponse()
+          : "";
+
+      const responseValue = responseField?.value || "";
+
+      return {
+        callbackTriggered,
+        angularHandled,
+        grecaptchaResponse,
+        responseValue,
+      };
+    }, result.token);
+
+    if (
+      !verificationState.callbackTriggered &&
+      !verificationState.angularHandled
+    ) {
+      throw new Error(
+        "Captcha success callback did not run on the login form.",
+      );
+    }
+
+    await page.waitForTimeout(500);
+
+    status(
+      "VERIFICATION",
+      `Captcha applied (${verificationState.callbackTriggered ? "widget callback" : "Angular fallback"}); proceeding with submission...`,
+    );
+
+    const loginButtonSelectors = [
+      'button[type="submit"]',
+      'button:has-text("Sign In")',
+      'button:has-text("Log In")',
+      'button:has-text("Login")',
+      'input[type="submit"]',
+      ".login-button",
+      "#login-button",
+    ];
+
+    for (const selector of loginButtonSelectors) {
+      const loginButton = page.locator(selector).first();
+      const buttonVisible = await loginButton.isVisible().catch(() => false);
+      if (buttonVisible) {
+        await loginButton.click({ force: true });
+        status("VERIFICATION", "Form submission initiated successfully");
+        return true;
+      }
+    }
+
+    status(
+      "VERIFICATION",
+      "No submit button found, trying keyboard submission",
+    );
+    await page.keyboard.press("Enter");
+    return true;
+  } catch (error) {
+    status(
+      "VERIFICATION_ERROR",
+      `Form verification processing failed: ${error.message}`,
+    );
+    throw error;
+  }
+}
+
 async function login(page) {
   status(
     "LOGIN",
@@ -562,7 +1043,19 @@ async function login(page) {
     .locator('input[formcontrolname="password"]')
     .fill(CONFIG.USER_PASSWORD, { timeout: 30000 });
 
-  status("WAITING_CAPTCHA", "Credentials filled; complete CAPTCHA and sign in");
+  try {
+    await solveAndSubmitCaptcha(page);
+  } catch (error) {
+    const message = String(error?.message || error);
+    if (/did not finish loading/i.test(message)) {
+      status("FORM_NOT_READY", message);
+    }
+    status(
+      "MANUAL_VERIFICATION",
+      `Automated verification unavailable: ${message}. Manual verification may be required.`,
+    );
+  }
+
   await waitForLoginOrDashboard(page);
   status("DASHBOARD", "Dashboard detected");
 }
@@ -2550,11 +3043,23 @@ async function attemptBooking(page) {
 
 async function main() {
   status("START", "Launching fast Playwright worker");
-  const { browser, context, page } = await launchBrowser();
+  let browserState = await launchBrowser({
+    useProxy: !CONFIG.DEFER_PROXY_UNTIL_AFTER_LOGIN,
+  });
+  let { browser, context, page } = browserState;
   let completionReported = false;
 
   try {
     await login(page);
+
+    if (CONFIG.DEFER_PROXY_UNTIL_AFTER_LOGIN) {
+      browserState = await switchBrowserToProxyAfterLogin({
+        browser,
+        context,
+        page,
+      });
+      ({ browser, context, page } = browserState);
+    }
 
     while (true) {
       const result = await attemptBooking(page).catch((error) => {
