@@ -104,8 +104,8 @@ const CONFIG = {
     Number(process.env.VISA_HOT_BURST_OUTCOME_TIMEOUT_MS) || 700,
   ),
   HOT_FINAL_OUTCOME_POLL_MS: Math.max(
-    25,
-    Number(process.env.VISA_HOT_FINAL_OUTCOME_POLL_MS) || 50,
+    90,
+    Number(process.env.VISA_HOT_FINAL_OUTCOME_POLL_MS) || 150,
   ),
   HOT_FINAL_BURST_DELAY_MS: Math.max(
     0,
@@ -2213,7 +2213,7 @@ async function clickExactActionButton(
           }
 
           const text = normalize(element.textContent || "");
-          if (text !== target) return null;
+          if (!text.includes(target)) return null;
 
           try {
             element.scrollIntoView({ block: "center", inline: "nearest" });
@@ -2245,52 +2245,66 @@ async function clickExactActionButton(
       .catch(() => null);
 
   if (isPendingProceedAction) {
-    const clickedText = await clickTargetOnce();
-    if (!clickedText) {
-      return null;
-    }
+    const beforeUrl = page.url();
+    const deadline = Date.now() + effectiveTimeoutMs;
 
-    const outcome = await waitForFinalActionOutcome(
-      page,
-      null,
-      Math.min(outcomeTimeoutMs, Math.max(2500, effectiveTimeoutMs)),
-      CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
-    ).catch(() => null);
-
-    if (outcome === "booking") {
-      status("BOOKING_TOAST", "Appointment Booked Successfully toast detected");
-      return clickedText;
-    }
-
-    if (outcome === "applicant") {
-      status(
-        "APPLICANT",
-        "Applicant toast detected; rechecking the checkbox once and retrying the final click",
-      );
-      await ensureApplicantChecked(page, { attempts: 2, delayMs: 150 }).catch(
-        () => false,
-      );
-      await page.waitForTimeout(150).catch(() => {});
-
-      const retryClickedText = await clickTargetOnce();
-      if (!retryClickedText) {
-        return null;
+    while (Date.now() < deadline) {
+      // eslint-disable-next-line no-await-in-loop
+      const clickedText = await clickTargetOnce();
+      if (!clickedText) {
+        status(
+          "FINAL_ACTION",
+          `No final button click yet for ${targetText}; retrying`,
+        );
+        // eslint-disable-next-line no-await-in-loop
+        await page.waitForTimeout(CONFIG.HOT_FINAL_OUTCOME_POLL_MS);
+        continue;
       }
 
-      const retryOutcome = await waitForFinalActionOutcome(
+      status(
+        "FINAL_ACTION",
+        `Clicked ${clickedText}; waiting for toast or redirect`,
+      );
+
+      // eslint-disable-next-line no-await-in-loop
+      const outcome = await waitForFinalActionOutcome(
         page,
-        null,
-        Math.min(outcomeTimeoutMs, Math.max(2500, effectiveTimeoutMs)),
+        beforeUrl,
+        Math.min(outcomeTimeoutMs, Math.max(2500, deadline - Date.now())),
         CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
       ).catch(() => null);
 
-      if (retryOutcome === "booking") {
+      if (outcome === "booking") {
         status(
           "BOOKING_TOAST",
           "Appointment Booked Successfully toast detected",
         );
-        return retryClickedText;
+        return clickedText;
       }
+
+      if (outcome === "applicant") {
+        status(
+          "APPLICANT",
+          "Applicant toast detected; rechecking the checkbox and continuing clicks",
+        );
+        // eslint-disable-next-line no-await-in-loop
+        await ensureApplicantChecked(page, { attempts: 2, delayMs: 150 }).catch(
+          () => false,
+        );
+        // eslint-disable-next-line no-await-in-loop
+        await page.waitForTimeout(150).catch(() => {});
+        continue;
+      }
+
+      status(
+        "FINAL_ACTION_WAIT",
+        `Clicked ${clickedText} but no toast or redirect appeared yet; url=${page.url()}`,
+      );
+
+      // No toast yet. Keep clicking until the timeout expires so a slow
+      // confirmation path does not stop the final action too early.
+      // eslint-disable-next-line no-await-in-loop
+      await page.waitForTimeout(CONFIG.HOT_FINAL_OUTCOME_POLL_MS);
     }
 
     return null;
@@ -2344,8 +2358,21 @@ async function waitForFinalActionOutcome(
   const start = Date.now();
   let bookingToastSeenAt = null;
   let applicantToastSeenAt = null;
+  const initialUrl = String(beforeUrl || page.url() || "");
+  const slotUrlPattern = /\/home\/appointment\/slot(?:[/?#]|$)/i;
 
   while (Date.now() - start < timeoutMs) {
+    const currentUrl = String(page.url() || "");
+    if (
+      initialUrl &&
+      currentUrl &&
+      currentUrl !== initialUrl &&
+      !slotUrlPattern.test(currentUrl)
+    ) {
+      status("FINAL_REDIRECT", `Detected redirect to ${currentUrl}`);
+      return "booking";
+    }
+
     const bookingToastVisible = await hasBookingSuccessToast(page).catch(
       () => false,
     );
@@ -2379,6 +2406,11 @@ async function waitForFinalActionOutcome(
     // eslint-disable-next-line no-await-in-loop
     await page.waitForTimeout(pollIntervalMs);
   }
+
+  status(
+    "FINAL_ACTION_WAIT",
+    `Timed out waiting for toast or redirect after ${Math.round(timeoutMs)}ms`,
+  );
 
   return null;
 }
