@@ -226,9 +226,122 @@ function selectLeastUsedProxy(pool, activeProxyUrls) {
 
 function safeOneLine(value) {
   return String(value ?? "")
-    .replace(/[\r\n]+/g, " ")
+    .replace(/([\r\n]+)/g, " ")
     .replace(/\s{2,}/g, " ")
     .trim();
+}
+
+// Preflight proxy health checks
+const net = require("node:net");
+
+const PREFLIGHT_TCP_TIMEOUT_MS = Math.max(
+  1500,
+  Number(process.env.PROXY_PREFLIGHT_TCP_TIMEOUT_MS) || 3000,
+);
+const PREFLIGHT_CONNECT_TIMEOUT_MS = Math.max(
+  2000,
+  Number(process.env.PROXY_PREFLIGHT_CONNECT_TIMEOUT_MS) || 4000,
+);
+const PREFLIGHT_MAX_ATTEMPTS = Math.max(
+  1,
+  Number(process.env.PROXY_PREFLIGHT_MAX_ATTEMPTS) || 3,
+);
+
+function tcpConnect(host, port, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect({ host, port }, () => {
+      sock.destroy();
+      resolve(true);
+    });
+    sock.on("error", (err) => {
+      try {
+        sock.destroy();
+      } catch {}
+      reject(err);
+    });
+    sock.setTimeout(timeoutMs, () => {
+      try {
+        sock.destroy();
+      } catch {}
+      reject(new Error("tcp timeout"));
+    });
+  });
+}
+
+function httpConnectThroughProxy(proxyParsed, targetHost, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const proxyHost = proxyParsed.hostname;
+    const proxyPort = Number(
+      proxyParsed.port || (proxyParsed.protocol === "https:" ? 443 : 80),
+    );
+
+    const sock = net.connect({ host: proxyHost, port: proxyPort }, () => {
+      // Send a CONNECT request for TLS tunnel test
+      const connectReq = `CONNECT ${targetHost}:443 HTTP/1.1\r\nHost: ${targetHost}:443\r\nConnection: close\r\n\r\n`;
+      sock.write(connectReq);
+    });
+
+    let acc = "";
+    const onData = (chunk) => {
+      acc += String(chunk || "");
+      // Stop after headers received
+      if (acc.includes("\r\n\r\n")) {
+        const statusLine = acc.split(/\r\n/)[0] || "";
+        const m = statusLine.match(/HTTP\/\d\.\d\s+(\d{3})/);
+        const code = m ? Number(m[1]) : 0;
+        try {
+          sock.destroy();
+        } catch {}
+        if (code >= 200 && code < 300) {
+          resolve(true);
+        } else {
+          reject(new Error(`CONNECT failed ${code || statusLine}`));
+        }
+      }
+    };
+
+    const onError = (err) => {
+      try {
+        sock.destroy();
+      } catch {}
+      reject(err);
+    };
+
+    sock.on("data", onData);
+    sock.on("error", onError);
+    sock.setTimeout(timeoutMs, () => {
+      try {
+        sock.destroy();
+      } catch {}
+      reject(new Error("connect timeout"));
+    });
+  });
+}
+
+async function checkProxyHealth(proxyUrl, platformHost) {
+  if (!proxyUrl) return { ok: false, reason: "no-proxy" };
+  try {
+    const parsed = new URL(proxyUrl);
+    const proxyHost = parsed.hostname;
+    const proxyPort = Number(
+      parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+    );
+
+    // Basic TCP reachability
+    await tcpConnect(proxyHost, proxyPort, PREFLIGHT_TCP_TIMEOUT_MS);
+
+    // Try CONNECT to platform host and to Google (recaptcha) as a probe.
+    const targets = [platformHost || "www.google.com", "www.google.com"];
+    for (const t of targets) {
+      // if CONNECT fails, throw
+      // eslint-disable-next-line no-await-in-loop
+      await httpConnectThroughProxy(parsed, t, PREFLIGHT_CONNECT_TIMEOUT_MS);
+    }
+
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: String(err?.message || err) };
+  }
 }
 
 function extractIsoDateFromText(text) {
@@ -323,6 +436,9 @@ class WorkerPool {
     this.proxyFallback = normalizeProxyUrl(
       process.env.VISA_PROXY_URL || process.env.VISA_PROXY_SERVER || "",
     );
+
+    /** @type {Set<string>} */
+    this.failedProxyUrls = new Set();
 
     this.notificationService = notificationService || null;
 
@@ -632,17 +748,117 @@ class WorkerPool {
       }
     }
 
-    const proxyUrl = proxySelection.proxyUrl;
+    // Preflight selected proxy(s) to avoid launching workers with broken tunnels.
+    if (proxySelection?.proxyUrl) {
+      let attempts = 0;
+      let healthy = false;
+      let currentSelection = proxySelection;
+      const platformHost = (() => {
+        try {
+          return new URL(session.config.loginUrl).hostname;
+        } catch {
+          return "www.google.com";
+        }
+      })();
+
+      while (attempts < PREFLIGHT_MAX_ATTEMPTS && currentSelection?.proxyUrl) {
+        // Skip proxies we've already marked failed.
+        if (this.failedProxyUrls.has(currentSelection.proxyUrl)) {
+          // Try to pick another candidate
+        } else {
+          // eslint-disable-next-line no-await-in-loop
+          const result = await checkProxyHealth(
+            currentSelection.proxyUrl,
+            platformHost,
+          ).catch((e) => ({ ok: false, reason: String(e?.message || e) }));
+          if (result.ok) {
+            healthy = true;
+            proxySelection = currentSelection;
+            break;
+          }
+
+          // Mark failed and log
+          this.failedProxyUrls.add(currentSelection.proxyUrl);
+          this.store.appendLog(
+            sessionId,
+            "warn",
+            `Proxy preflight failed for ${describeProxyUrl(currentSelection.proxyUrl)}: ${result.reason}`,
+          );
+        }
+
+        attempts += 1;
+
+        // Try to get another candidate: prefer Proxy11 rotator if configured
+        if (
+          currentSelection?.proxySource &&
+          currentSelection.proxySource.startsWith("proxy11") &&
+          typeof this.proxy11Rotator?.acquire === "function"
+        ) {
+          // Acquire next from rotator (rotator advances nextIndex on each acquire)
+          // eslint-disable-next-line no-await-in-loop
+          currentSelection = await this.proxy11Rotator
+            .acquire({
+              sessionId,
+              activeProxyUrls: getActiveProxyUrls(
+                this.active,
+                this.proxyAssignments,
+              ),
+            })
+            .catch(() => null);
+        } else {
+          // Select from our static pool but avoid failed proxies
+          const reserved = getActiveProxyUrls(
+            this.active,
+            this.proxyAssignments,
+          );
+          const avoid = new Set([...reserved, ...this.failedProxyUrls]);
+          currentSelection = selectProxySelection(
+            sessionId,
+            this.proxyPool,
+            this.proxyFallback,
+            avoid,
+            sessionProxyUrl,
+          );
+        }
+
+        if (!currentSelection || !currentSelection.proxyUrl) break;
+      }
+
+      if (!healthy) {
+        this.store.appendLog(
+          sessionId,
+          "warn",
+          "No healthy proxy found after preflight; launching without proxy for this session",
+        );
+        proxySelection = {
+          proxyUrl: "",
+          proxyIndex: null,
+          proxySource: "none",
+        };
+      }
+    }
+
     this.proxyAssignments.set(sessionId, proxySelection);
-    if (proxyUrl) {
-      env.VISA_PROXY_URL = proxyUrl;
+    const finalProxyUrl = proxySelection?.proxyUrl || "";
+    if (finalProxyUrl) {
+      env.VISA_PROXY_URL = finalProxyUrl;
+      delete env.VISA_PROXY_SERVER;
     } else {
+      delete env.VISA_PROXY_URL;
+      delete env.VISA_PROXY_SERVER;
+      delete env.VISA_PROXY_BYPASS;
       this.store.appendLog(
         sessionId,
         "warn",
         "No proxy configured for this session; it will use the local IP",
       );
     }
+
+    this.store.appendLog(
+      sessionId,
+      "info",
+      `Final proxy decision: ${describeProxySelection(proxySelection)}`,
+    );
 
     const launchSession = this.store.getSession(sessionId);
     if (!launchSession || launchSession.status === "STOPPED") {
