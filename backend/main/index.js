@@ -2131,12 +2131,12 @@ async function clickBookPostAppointmentButton(page) {
 
 async function clickProceedButton(page) {
   const targetText = "SELECT POST AND PROCEED";
-  const maxAttempts = 3;
+  const deadline =
+    Date.now() + Math.max(15000, CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS);
 
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const remainingAttempts = maxAttempts - attempt - 1;
+  while (Date.now() < deadline) {
     const clickedText = await clickExactActionButton(page, targetText, {
-      timeoutMs: attempt === 0 ? 20000 : 12000,
+      timeoutMs: Math.min(20000, Math.max(12000, deadline - Date.now())),
     }).catch(() => null);
 
     if (clickedText) {
@@ -2144,13 +2144,11 @@ async function clickProceedButton(page) {
       return true;
     }
 
-    if (remainingAttempts > 0) {
-      status(
-        "PROCEED",
-        `No booking toast after SELECT POST AND PROCEED click; retrying (${remainingAttempts} left)`,
-      );
-      await page.waitForTimeout(250).catch(() => {});
-    }
+    status(
+      "PROCEED",
+      `No booking toast after SELECT POST AND PROCEED click; retrying until timeout`,
+    );
+    await page.waitForTimeout(250).catch(() => {});
   }
 
   return false;
