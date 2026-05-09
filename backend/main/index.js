@@ -117,6 +117,109 @@ const CONFIG = {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function clickTextCandidate(
+  page,
+  targetText,
+  { timeoutMs = 5000, selectors = [], scope = null } = {},
+) {
+  const normalizedTarget = String(targetText || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalizedTarget || page.isClosed()) return null;
+
+  const selectorList =
+    selectors.length > 0 ? selectors : ["button", "a", "[role='button']"];
+  const scoped = scope ? page.locator(scope).first() : null;
+  const exactPattern = new RegExp(
+    `^\\s*${escapeRegExp(normalizedTarget)}\\s*$`,
+    "i",
+  );
+
+  for (const selector of selectorList) {
+    const locator = scoped ? scoped.locator(selector) : page.locator(selector);
+    const candidates = [
+      locator.filter({ hasText: normalizedTarget }).first(),
+      locator.filter({ hasText: exactPattern }).first(),
+    ];
+
+    for (const candidate of candidates) {
+      try {
+        await candidate.waitFor({ state: "visible", timeout: timeoutMs });
+        await candidate.scrollIntoViewIfNeeded().catch(() => {});
+        await candidate.click({ timeout: timeoutMs, force: true });
+        return normalizedTarget;
+      } catch {
+        // Try the next candidate.
+      }
+    }
+  }
+
+  return page
+    .evaluate((target) => {
+      const normalize = (value) =>
+        String(value || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toUpperCase();
+
+      const isVisible = (element) => {
+        if (!element) return false;
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          rect.width > 0 &&
+          rect.height > 0
+        );
+      };
+
+      const roots = [];
+      const bookingBlock = document.querySelector(".ofc-book-slot-block");
+      if (bookingBlock) roots.push(bookingBlock);
+      roots.push(document);
+
+      for (const root of roots) {
+        const candidates = Array.from(
+          root.querySelectorAll("button, a, [role='button'], mat-option"),
+        );
+
+        for (const element of candidates) {
+          if (!isVisible(element)) continue;
+          if (
+            element.getAttribute("aria-disabled") === "true" ||
+            element.disabled
+          ) {
+            continue;
+          }
+
+          const text = normalize(element.textContent || "");
+          if (!text.includes(target)) continue;
+
+          try {
+            element.scrollIntoView({ block: "center", inline: "nearest" });
+          } catch {
+            // ignore
+          }
+
+          try {
+            element.click();
+            return text;
+          } catch {
+            // continue searching
+          }
+        }
+      }
+
+      return null;
+    }, normalizedTarget.toUpperCase())
+    .catch(() => null);
+}
+
 // Runtime throttles (per worker process)
 let lastPickupRefreshAt = 0;
 let consecutiveNoDateAttempts = 0;
@@ -1109,16 +1212,29 @@ async function selectPickupPoint(page) {
   status("PICKUP", `Selecting pickup ${CONFIG.PICKUP_POINT}`);
   // Critical: scope to the booking block so we do NOT hit the sidebar Language mat-select.
   const bookingBlock = getBookingBlockLocator(page);
-  const select = bookingBlock
-    .locator("mat-select[panelclass*='drop-down-panelcls'], mat-select")
-    .first();
-  await select.click({ timeout: 5000, force: true });
+  const selectClicked = await clickTextCandidate(page, CONFIG.PICKUP_POINT, {
+    timeoutMs: 5000,
+    selectors: ["mat-select"],
+    scope: ".ofc-book-slot-block",
+  });
+
+  if (!selectClicked) {
+    await bookingBlock
+      .locator("mat-select[panelclass*='drop-down-panelcls'], mat-select")
+      .first()
+      .click({ timeout: 8000, force: true });
+  }
   // mat-option renders in the global overlay; keep it global but ensure we click the right label.
-  await page
-    .locator("mat-option")
-    .filter({ hasText: CONFIG.PICKUP_POINT })
-    .first()
-    .click({ timeout: 5000, force: true });
+  const optionClicked = await clickTextCandidate(page, CONFIG.PICKUP_POINT, {
+    timeoutMs: 8000,
+    selectors: ["mat-option"],
+  });
+
+  if (!optionClicked) {
+    throw new Error(
+      `Pickup option ${CONFIG.PICKUP_POINT} not found or not clickable`,
+    );
+  }
 }
 
 async function setApplicantCheckboxState(page, desiredChecked) {
@@ -2130,25 +2246,52 @@ async function clickBookPostAppointmentButton(page) {
 }
 
 async function clickProceedButton(page) {
-  const targetText = "SELECT POST AND PROCEED";
-  const deadline =
-    Date.now() + Math.max(15000, CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS);
+  const button = page
+    .locator(
+      "button:has-text('SELECT POST AND PROCEED'), a:has-text('SELECT POST AND PROCEED'), [role='button']:has-text('SELECT POST AND PROCEED')",
+    )
+    .first();
 
-  while (Date.now() < deadline) {
-    const clickedText = await clickExactActionButton(page, targetText, {
-      timeoutMs: Math.min(20000, Math.max(12000, deadline - Date.now())),
-    }).catch(() => null);
+  await button.waitFor({
+    state: "visible",
+    timeout: 15000,
+  });
 
-    if (clickedText) {
-      status("PROCEED", `Clicked ${clickedText}`);
-      return true;
+  const readyDeadline = Date.now() + 10000;
+  while (Date.now() < readyDeadline) {
+    const ariaDisabled = await button
+      .getAttribute("aria-disabled")
+      .catch(() => null);
+    const enabled = await button.isEnabled().catch(() => false);
+    if (enabled && ariaDisabled !== "true") {
+      break;
     }
 
-    status(
-      "PROCEED",
-      `No booking toast after SELECT POST AND PROCEED click; retrying until timeout`,
-    );
-    await page.waitForTimeout(250).catch(() => {});
+    await page.waitForTimeout(100).catch(() => {});
+  }
+
+  await button.scrollIntoViewIfNeeded();
+  await button.click({ timeout: 10000 });
+
+  return true;
+}
+
+async function safeClickProceed(page, retries = 3) {
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    try {
+      if (page.isClosed()) {
+        throw new Error("Page closed");
+      }
+
+      const success = await clickProceedButton(page);
+      if (success) {
+        return true;
+      }
+    } catch (error) {
+      const message = String(error?.message || error);
+      status("PROCEED", `Retry ${attempt + 1} failed: ${message}`);
+      await page.waitForTimeout(300).catch(() => {});
+    }
   }
 
   return false;
@@ -2173,74 +2316,11 @@ async function clickExactActionButton(
   const outcomeTimeoutMs = CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS;
 
   const clickTargetOnce = async () =>
-    page
-      .evaluate((target) => {
-        const normalize = (value) =>
-          String(value || "")
-            .replace(/\s+/g, " ")
-            .trim()
-            .toUpperCase();
-
-        const isVisible = (element) => {
-          if (!element) return false;
-          const style = window.getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return (
-            style.display !== "none" &&
-            style.visibility !== "hidden" &&
-            rect.width > 0 &&
-            rect.height > 0
-          );
-        };
-
-        const roots = [];
-        const bookingBlock = document.querySelector(".ofc-book-slot-block");
-        if (bookingBlock) {
-          roots.push(bookingBlock);
-        }
-        roots.push(document);
-
-        const clickCandidate = (element) => {
-          if (!element) return null;
-          if (!isVisible(element)) return null;
-          if (
-            element.getAttribute("aria-disabled") === "true" ||
-            element.disabled
-          ) {
-            return null;
-          }
-
-          const text = normalize(element.textContent || "");
-          if (!text.includes(target)) return null;
-
-          try {
-            element.scrollIntoView({ block: "center", inline: "nearest" });
-          } catch {
-            // ignore
-          }
-
-          try {
-            element.click();
-            return text;
-          } catch {
-            return null;
-          }
-        };
-
-        for (const root of roots) {
-          const candidates = Array.from(
-            root.querySelectorAll("button, a, [role='button']"),
-          );
-
-          for (const candidate of candidates) {
-            const clicked = clickCandidate(candidate);
-            if (clicked) return clicked;
-          }
-        }
-
-        return null;
-      }, targetText)
-      .catch(() => null);
+    clickTextCandidate(page, targetText, {
+      timeoutMs: Math.min(5000, effectiveTimeoutMs),
+      selectors: ["button", "a", "[role='button']"],
+      scope: ".ofc-book-slot-block",
+    });
 
   if (isPendingProceedAction) {
     const beforeUrl = page.url();
@@ -2299,6 +2379,14 @@ async function clickExactActionButton(
         `Clicked ${clickedText} but no toast or redirect appeared yet; url=${page.url()}`,
       );
 
+      if (page.isClosed()) {
+        status(
+          "FINAL_REDIRECT",
+          "Page closed after final action; treating as completed booking flow",
+        );
+        return clickedText;
+      }
+
       // No toast yet. Keep clicking until the timeout expires so a slow
       // confirmation path does not stop the final action too early.
       // eslint-disable-next-line no-await-in-loop
@@ -2356,10 +2444,18 @@ async function waitForFinalActionOutcome(
   const start = Date.now();
   let bookingToastSeenAt = null;
   let applicantToastSeenAt = null;
-  const initialUrl = String(beforeUrl || page.url() || "");
+  const initialUrl = String(beforeUrl || "");
   const slotUrlPattern = /\/home\/appointment\/slot(?:[/?#]|$)/i;
 
   while (Date.now() - start < timeoutMs) {
+    if (page.isClosed()) {
+      status(
+        "FINAL_REDIRECT",
+        "Page closed while waiting for final action outcome",
+      );
+      return "booking";
+    }
+
     const currentUrl = String(page.url() || "");
     if (
       initialUrl &&
@@ -2568,7 +2664,7 @@ async function attemptBooking(page) {
   }
 
   status("PROCEED", "Clicking SELECT POST AND PROCEED");
-  const proceeded = await clickProceedButton(page);
+  const proceeded = await safeClickProceed(page);
   if (!proceeded) {
     status("PROCEED", "SELECT POST AND PROCEED button not found/ready");
     return "slot";
