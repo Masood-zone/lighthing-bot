@@ -45,7 +45,7 @@ const CONFIG = {
     process.env.VISA_PLATFORM_URL ||
     "https://www.usvisaappt.com/visaapplicantui/login",
   USER_EMAIL: process.env.VISA_USER_EMAIL || "Wilhelmina219.doe@gmail.com",
-  USER_PASSWORD: process.env.VISA_USER_PASSWORD || "",
+  USER_PASSWORD: process.env.VISA_USER_PASSWORD || " ",
   USER_DISPLAY_NAME: process.env.VISA_USER_DISPLAY_NAME || "Wilhelmina Doe",
   PICKUP_POINT: process.env.VISA_PICKUP_POINT || "Accra",
   HEADLESS:
