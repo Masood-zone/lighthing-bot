@@ -2276,24 +2276,20 @@ async function clickProceedButton(page) {
   return true;
 }
 
-async function safeClickProceed(page, retries = 3) {
-  for (let attempt = 0; attempt < retries; attempt += 1) {
-    try {
-      if (page.isClosed()) {
-        throw new Error("Page closed");
-      }
+async function safeClickProceed(page) {
+  const success = await clickExactActionButton(
+    page,
+    "SELECT POST AND PROCEED",
+    {
+      timeoutMs: 15000,
+    },
+  ).catch(() => null);
 
-      const success = await clickProceedButton(page);
-      if (success) {
-        return true;
-      }
-    } catch (error) {
-      const message = String(error?.message || error);
-      status("PROCEED", `Retry ${attempt + 1} failed: ${message}`);
-      await page.waitForTimeout(300).catch(() => {});
-    }
+  if (success) {
+    return true;
   }
 
+  status("PROCEED", "SELECT POST AND PROCEED button not found/ready");
   return false;
 }
 
@@ -2444,7 +2440,7 @@ async function waitForFinalActionOutcome(
   const start = Date.now();
   let bookingToastSeenAt = null;
   let applicantToastSeenAt = null;
-  const initialUrl = String(beforeUrl || "");
+  const initialUrl = String(beforeUrl || page.url() || "");
   const slotUrlPattern = /\/home\/appointment\/slot(?:[/?#]|$)/i;
 
   while (Date.now() - start < timeoutMs) {
@@ -2659,6 +2655,7 @@ async function attemptBooking(page) {
       status("BOOK", "BOOK POST APPOINTMENT button not found/ready");
       return "slot";
     }
+    await goToDashboard(page).catch(() => {});
     calendarResumeTarget = null;
     return "done";
   }
@@ -2689,7 +2686,7 @@ async function main() {
       });
 
       if (result === "done") {
-        status("SUCCESS", "Final booking toast confirmed; pausing worker");
+        status("SUCCESS", "Final booking confirmed; pausing worker");
         if (!completionReported) {
           completionReported = true;
           status("COMPLETED", "Booking flow completed successfully");
