@@ -2237,6 +2237,8 @@ async function clickEarliestTimeSlot(page, timeoutMs = 4000) {
 async function clickBookPostAppointmentButton(page) {
   const result = await clickExactActionButton(page, "BOOK POST APPOINTMENT", {
     timeoutMs: 15000,
+    maxAttempts: 2,
+    attemptGapMs: 2000,
   });
 
   if (!result) return false;
@@ -2282,6 +2284,8 @@ async function safeClickProceed(page) {
     "SELECT POST AND PROCEED",
     {
       timeoutMs: 15000,
+      maxAttempts: 2,
+      attemptGapMs: 2000,
     },
   ).catch(() => null);
 
@@ -2296,7 +2300,7 @@ async function safeClickProceed(page) {
 async function clickExactActionButton(
   page,
   expectedText,
-  { timeoutMs = 15000 } = {},
+  { timeoutMs = 15000, maxAttempts = 2, attemptGapMs = 2000 } = {},
 ) {
   const targetText = String(expectedText || "")
     .replace(/\s+/g, " ")
@@ -2305,36 +2309,41 @@ async function clickExactActionButton(
 
   if (!targetText) return null;
 
-  const start = Date.now();
-  const isPendingProceedAction =
-    !CONFIG.RESCHEDULE && targetText === "SELECT POST AND PROCEED";
+  const clickLimit = Math.max(1, Math.min(2, Number(maxAttempts) || 2));
+  const minimumGapMs = Math.max(2000, Number(attemptGapMs) || 2000);
   const effectiveTimeoutMs = timeoutMs;
-  const outcomeTimeoutMs = CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS;
+  const outcomeTimeoutMs = Math.min(
+    Math.max(250, CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS),
+    minimumGapMs,
+  );
 
   const clickTargetOnce = async () =>
     clickTextCandidate(page, targetText, {
-      timeoutMs: Math.min(5000, effectiveTimeoutMs),
+      timeoutMs: Math.min(2000, effectiveTimeoutMs),
       selectors: ["button", "a", "[role='button']"],
       scope: ".ofc-book-slot-block",
     });
 
-  if (isPendingProceedAction) {
+  for (let attempt = 0; attempt < clickLimit; attempt += 1) {
+    if (page.isClosed()) {
+      status(
+        "FINAL_REDIRECT",
+        "Page closed before final action could be clicked",
+      );
+      return null;
+    }
+
+    const attemptStartedAt = Date.now();
     const beforeUrl = page.url();
-    const deadline = Date.now() + effectiveTimeoutMs;
 
-    while (Date.now() < deadline) {
-      // eslint-disable-next-line no-await-in-loop
-      const clickedText = await clickTargetOnce();
-      if (!clickedText) {
-        status(
-          "FINAL_ACTION",
-          `No final button click yet for ${targetText}; retrying`,
-        );
-        // eslint-disable-next-line no-await-in-loop
-        await page.waitForTimeout(CONFIG.HOT_FINAL_OUTCOME_POLL_MS);
-        continue;
-      }
-
+    // eslint-disable-next-line no-await-in-loop
+    const clickedText = await clickTargetOnce();
+    if (!clickedText) {
+      status(
+        "FINAL_ACTION",
+        `No final button click yet for ${targetText}; attempt ${attempt + 1} of ${clickLimit}`,
+      );
+    } else {
       status(
         "FINAL_ACTION",
         `Clicked ${clickedText}; waiting for toast or redirect`,
@@ -2344,7 +2353,7 @@ async function clickExactActionButton(
       const outcome = await waitForFinalActionOutcome(
         page,
         beforeUrl,
-        Math.min(outcomeTimeoutMs, Math.max(2500, deadline - Date.now())),
+        outcomeTimeoutMs,
         CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
       ).catch(() => null);
 
@@ -2359,74 +2368,40 @@ async function clickExactActionButton(
       if (outcome === "applicant") {
         status(
           "APPLICANT",
-          "Applicant toast detected; rechecking the checkbox and continuing clicks",
+          "Applicant toast detected; rechecking the checkbox before the next click",
         );
         // eslint-disable-next-line no-await-in-loop
         await ensureApplicantChecked(page, { attempts: 2, delayMs: 150 }).catch(
           () => false,
         );
-        // eslint-disable-next-line no-await-in-loop
-        await page.waitForTimeout(150).catch(() => {});
-        continue;
-      }
-
-      status(
-        "FINAL_ACTION_WAIT",
-        `Clicked ${clickedText} but no toast or redirect appeared yet; url=${page.url()}`,
-      );
-
-      if (page.isClosed()) {
+      } else {
         status(
-          "FINAL_REDIRECT",
-          "Page closed after final action; treating as completed booking flow",
+          "FINAL_ACTION_WAIT",
+          `Clicked ${clickedText} but no toast or redirect appeared yet; url=${page.url()}`,
         );
-        return clickedText;
-      }
 
-      // No toast yet. Keep clicking until the timeout expires so a slow
-      // confirmation path does not stop the final action too early.
+        if (page.isClosed()) {
+          status(
+            "FINAL_REDIRECT",
+            "Page closed after final action; treating as completed booking flow",
+          );
+          return clickedText;
+        }
+      }
+    }
+
+    if (attempt < clickLimit - 1) {
+      const elapsed = Date.now() - attemptStartedAt;
+      const remainingGap = Math.max(0, minimumGapMs - elapsed);
       // eslint-disable-next-line no-await-in-loop
-      await page.waitForTimeout(CONFIG.HOT_FINAL_OUTCOME_POLL_MS);
+      await page.waitForTimeout(remainingGap).catch(() => {});
     }
-
-    return null;
   }
 
-  while (Date.now() - start < effectiveTimeoutMs) {
-    // eslint-disable-next-line no-await-in-loop
-    const clickedText = await clickTargetOnce();
-
-    if (clickedText) {
-      const outcome = await waitForFinalActionOutcome(
-        page,
-        null,
-        Math.min(
-          outcomeTimeoutMs,
-          Math.max(1000, effectiveTimeoutMs - (Date.now() - start)),
-        ),
-        CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
-      ).catch(() => null);
-
-      if (outcome === "booking") {
-        status(
-          "BOOKING_TOAST",
-          "Appointment Booked Successfully toast detected",
-        );
-        return clickedText;
-      }
-
-      if (outcome === "applicant" && isPendingProceedAction) {
-        status(
-          "APPLICANT",
-          "Applicant toast detected; rechecking the checkbox once and retrying the final click",
-        );
-        continue;
-      }
-    }
-
-    // eslint-disable-next-line no-await-in-loop
-    await page.waitForTimeout(CONFIG.HOT_FINAL_OUTCOME_POLL_MS);
-  }
+  status(
+    "FINAL_ACTION_WAIT",
+    `Final action not confirmed after ${clickLimit} attempt(s)`,
+  );
 
   return null;
 }
