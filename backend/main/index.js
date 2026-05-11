@@ -443,6 +443,10 @@ function getAllowedDateRange() {
   };
 }
 
+function canTraverseCalendarMonths() {
+  return CONFIG.MAX_MONTHS > 1;
+}
+
 function getAppBaseUrl() {
   const u = new URL(CONFIG.PLATFORM_URL);
   const marker = "/visaapplicantui";
@@ -1870,6 +1874,7 @@ async function huntGreenDate(
   page,
   { startTarget: explicitStartTarget = null } = {},
 ) {
+  const allowTraversal = canTraverseCalendarMonths();
   const allowed = getAllowedDateRange();
   const maxMonthKey = allowed.max
     ? allowed.max.getUTCFullYear() * 12 + allowed.max.getUTCMonth()
@@ -1945,7 +1950,9 @@ async function huntGreenDate(
     monthAttempts,
     outOfRangeFound,
     resumeTarget: clampMonthYearToAllowedRange(
-      currentHeader ? addMonthsToMonthYear(currentHeader, 1) : startTarget,
+      allowTraversal && currentHeader
+        ? addMonthsToMonthYear(currentHeader, 1)
+        : startTarget,
       allowed,
     ),
   };
@@ -2050,11 +2057,14 @@ async function refreshPickupByToggle(page) {
 }
 
 async function refreshPickupAndRetryDateHunt(page, reason) {
+  const allowTraversal = canTraverseCalendarMonths();
   status(
     "PICKUP_REFRESH",
     reason === "OUT_OF_RANGE"
       ? "Only out-of-range green dates; refreshing pickup and retrying"
-      : "No usable date after traversal; refreshing pickup and retrying",
+      : allowTraversal
+        ? "No usable date after traversal; refreshing pickup and retrying"
+        : "No usable date in the selected month; refreshing pickup and retrying",
   );
 
   // If the calendar is still booting, do not refresh pickup yet.
@@ -2069,10 +2079,15 @@ async function refreshPickupAndRetryDateHunt(page, reason) {
   await waitForCalendarUiReady(page, 45000).catch(() => false);
   await page.waitForTimeout(180).catch(() => {});
 
-  status("PICKUP_REFRESH", "Pickup refreshed; running a second fast date hunt");
+  status(
+    "PICKUP_REFRESH",
+    allowTraversal
+      ? "Pickup refreshed; running a second fast date hunt"
+      : "Pickup refreshed; rescanning the selected month",
+  );
   const { dateSelected, monthAttempts, resumeTarget } =
     await huntGreenDate(page);
-  calendarResumeTarget = resumeTarget;
+  calendarResumeTarget = allowTraversal ? resumeTarget : null;
   if (monthAttempts > 0) {
     status(
       "CALENDAR",
@@ -2625,6 +2640,7 @@ async function waitForFinalActionOutcome(
 }
 
 async function attemptBooking(page) {
+  const allowTraversal = canTraverseCalendarMonths();
   await openAppointmentMode(page);
 
   const calendarReady = await waitForCalendarUiReady(page, 60000).catch(
@@ -2642,7 +2658,7 @@ async function attemptBooking(page) {
   }
 
   let { dateSelected, monthAttempts, resumeTarget } = await huntGreenDate(page);
-  calendarResumeTarget = resumeTarget;
+  calendarResumeTarget = allowTraversal ? resumeTarget : null;
 
   if (monthAttempts > 0) {
     status(
@@ -2717,6 +2733,28 @@ async function attemptBooking(page) {
         "SLOT",
         `No time slot found for date ${activeDate}; moving to next date`,
       );
+
+      if (!allowTraversal) {
+        const refreshed = await refreshPickupAndRetryDateHunt(page, "NO_SLOT");
+        if (!refreshed.refreshed) {
+          status(
+            "SLOT",
+            "Pickup refresh failed while rescanning the selected month",
+          );
+          return "slot";
+        }
+
+        if (!refreshed.dateSelected) {
+          status(
+            "DATE",
+            "No usable date found in the selected month after pickup refresh",
+          );
+          return "idle";
+        }
+
+        activeDate = refreshed.dateSelected;
+        continue;
+      }
     }
 
     const nextMonthTarget = await getNextTraversalMonthTarget(page);
