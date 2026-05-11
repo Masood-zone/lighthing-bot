@@ -143,6 +143,7 @@ If multiple in-range green dates exist, the worker tries them one-by-one until �
   - **BOOK POST APPOINTMENT**
 
 It waits for loading overlays and handles new windows if one opens.
+The final action is intentionally limited to at most two clicks, with a minimum 2-second gap between attempts, so the site is not hammered while it is still settling.
 
 ### F) Final confirmation (only then SUCCESS)
 
@@ -160,6 +161,8 @@ Finalization is `finalizeBookingAndConfirm()`:
 3. Safety rules:
    - it avoids “YES/OK” unless the dialog looks booking-related
    - it will not confirm cancellation dialogs
+
+- in RESCHEDULE mode, once booking is confirmed, it returns the browser to the dashboard and pauses there for manual review
 
 Only after success is detected does `fastBookingAttempt()` return `SUCCESS`.
 
@@ -193,3 +196,7 @@ These are the main algorithm updates that change runtime behavior:
   - `backend/main/visa-bot.js` → `finalizeBookingAndConfirm()` must confirm success before returning `SUCCESS`
   - `backend/main/visa-bot.js` → `appointmentWatcher()` emits `COMPLETED` only when `fastBookingAttempt()` returns `SUCCESS`
   - `backend/src/queue/workerPool.js` → `COMPLETED` triggers admin email via `enqueueBookingSuccess()`
+
+- Final action pacing:
+  - `backend/main/visa-bot.js` → final `SELECT POST AND PROCEED` / `BOOK POST APPOINTMENT` clicks are capped at two attempts with a 2-second gap
+  - `backend/main/visa-bot.js` → RESCHEDULE success returns the browser to the dashboard before the worker pauses

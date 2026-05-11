@@ -4,24 +4,24 @@ This document captures the current behavior of the Playwright booking worker in 
 
 ## High-Level Shape
 
-The worker has one shared booking loop. The only major branch is the mode gate in [openAppointmentMode](main/index.js#L515), which determines whether the worker enters the booking UI from the dashboard pending tile or from the my-appointments reschedule flow.
+The worker has one shared booking loop. The only major branch is the mode gate in [openAppointmentMode](main/index.js#L1083), which determines whether the worker enters the booking UI from the dashboard pending tile or from the my-appointments reschedule flow.
 
-After the booking UI is ready, both modes share the same calendar scan, slot hunt, applicant validation, and final-action recovery logic in [attemptBooking](main/index.js#L1732).
+After the booking UI is ready, both modes share the same calendar scan, slot hunt, applicant validation, and final-action recovery logic in [attemptBooking](main/index.js#L2483).
 
 ## Mode Comparison
 
-| Stage                 | PENDING                                                                     | RESCHEDULE                                              | Implementation Detail                                                                              |
-| --------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Entry point           | Opens dashboard and clicks the pending appointment tile                     | Opens my appointments and clicks RESCHEDULE             | [openAppointmentMode](main/index.js#L515)                                                          |
-| Confirmation handling | None                                                                        | May accept a native dialog or an Angular confirm dialog | Same function, reschedule branch only                                                              |
-| Booking UI wait       | Waits for `.ofc-book-slot-block` to appear and settle                       | Same                                                    | [waitForAppointmentBookingPageReady](main/index.js#L333)                                           |
-| Pickup selection      | Selects the configured pickup point, usually Accra                          | Skipped                                                 | [selectPickupPoint](main/index.js#L641)                                                            |
-| Calendar scan         | Hunts the first valid green date in range                                   | Same                                                    | [huntGreenDate](main/index.js#L1210)                                                               |
-| Slot search           | Waits briefly for time slots, then advances to the next date if none appear | Same                                                    | [clickEarliestTimeSlot](main/index.js#L1399) and [clickNextAvailableDateAfter](main/index.js#L979) |
-| Applicant validation  | Rechecks the Applicant list checkbox before final click                     | Same                                                    | [ensureApplicantChecked](main/index.js#L813)                                                       |
-| Final action          | Clicks SELECT POST AND PROCEED                                              | Clicks BOOK POST APPOINTMENT                            | [clickProceedButton](main/index.js#L1565), [clickBookPostAppointmentButton](main/index.js#L1549)   |
-| Success condition     | Requires a real redirect away from the slot page                            | Same                                                    | [waitForFinalActionOutcome](main/index.js#L1704)                                                   |
-| Exit behavior         | Worker exits after final success                                            | Same                                                    | [main](main/index.js#L1855)                                                                        |
+| Stage                 | PENDING                                                                     | RESCHEDULE                                                      | Implementation Detail                                                                               |
+| --------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Entry point           | Opens dashboard and clicks the pending appointment tile                     | Opens my appointments and clicks RESCHEDULE                     | [openAppointmentMode](main/index.js#L515)                                                           |
+| Confirmation handling | None                                                                        | May accept a native dialog or an Angular confirm dialog         | Same function, reschedule branch only                                                               |
+| Booking UI wait       | Waits for `.ofc-book-slot-block` to appear and settle                       | Same                                                            | [waitForAppointmentBookingPageReady](main/index.js#L972)                                            |
+| Pickup selection      | Selects the configured pickup point, usually Accra                          | Skipped                                                         | [selectPickupPoint](main/index.js#L1211)                                                            |
+| Calendar scan         | Hunts the first valid green date in range                                   | Same                                                            | [huntGreenDate](main/index.js#L1869)                                                                |
+| Slot search           | Waits briefly for time slots, then advances to the next date if none appear | Same                                                            | [clickEarliestTimeSlot](main/index.js#L2086) and [clickNextAvailableDateAfter](main/index.js#L1603) |
+| Applicant validation  | Rechecks the Applicant list checkbox before final click                     | Same                                                            | [ensureApplicantChecked](main/index.js#L1395)                                                       |
+| Final action          | Clicks SELECT POST AND PROCEED at most twice, with a 2-second gap           | Clicks BOOK POST APPOINTMENT at most twice, with a 2-second gap | [safeClickProceed](main/index.js#L2281), [clickBookPostAppointmentButton](main/index.js#L2237)      |
+| Success condition     | Requires a real redirect away from the slot page                            | Same, then returns to dashboard before pausing                  | [waitForFinalActionOutcome](main/index.js#L2409)                                                    |
+| Exit behavior         | Worker exits after final success                                            | Same                                                            | [main](main/index.js#L2625)                                                                         |
 
 ## PENDING Flow
 
@@ -34,7 +34,7 @@ After the booking UI is ready, both modes share the same calendar scan, slot hun
 | 5    | It hunts for a green date                                         | The helper returns the actual clicked day text, not a boolean                              |
 | 6    | If the selected date has no slot, it moves to the next green date | The slot wait is intentionally short so the loop does not stall                            |
 | 7    | It rechecks the Applicant list checkbox                           | This happens immediately before the final button click                                     |
-| 8    | It clicks SELECT POST AND PROCEED                                 | The button is matched by exact text                                                        |
+| 8    | It clicks SELECT POST AND PROCEED, at most twice                  | Each attempt is separated by a 2-second gap                                                |
 | 9    | It confirms success only if the page actually redirects           | A disappearing booking block alone is not treated as success                               |
 | 10   | It exits the worker loop                                          | A completed final action breaks the main loop                                              |
 
@@ -50,9 +50,10 @@ After the booking UI is ready, both modes share the same calendar scan, slot hun
 | 6    | It skips pickup selection                                 | The reschedule branch goes directly to date hunting                     |
 | 7    | It hunts dates and slots exactly like PENDING             | Shared calendar and slot logic                                          |
 | 8    | It rechecks the Applicant list checkbox                   | This is still required before final submit                              |
-| 9    | It clicks BOOK POST APPOINTMENT                           | Exact text match is required                                            |
+| 9    | It clicks BOOK POST APPOINTMENT, at most twice            | Each attempt is separated by a 2-second gap                             |
 | 10   | It confirms success only on a real redirect               | Same redirect-based success rule                                        |
-| 11   | It exits the worker loop                                  | No repeated reprocessing after success                                  |
+| 11   | It returns to the dashboard after success                 | The user lands on a stable page for manual follow-up                    |
+| 12   | It exits the worker loop                                  | No repeated reprocessing after success                                  |
 
 ## Applicant Checkbox Behavior
 
@@ -81,6 +82,7 @@ If a selected date does not show a slot quickly enough, the worker advances to t
 ## Final Action and Success Rules
 
 The final click goes through [clickExactActionButton](main/index.js#L1587), which exact-matches the button text and scopes the search to the booking block first.
+The helper now limits the final action to two clicks total and waits 2 seconds between attempts, which keeps the bot from hammering the booking button while the page is still settling.
 
 Success is determined by [waitForFinalActionOutcome](main/index.js#L1704):
 
@@ -91,6 +93,8 @@ Success is determined by [waitForFinalActionOutcome](main/index.js#L1704):
 | Neither redirect nor toast appears within the timeout | Failure / retry loop |
 
 This prevents false positives where the booking block disappears without the page actually navigating.
+
+In RESCHEDULE mode, a confirmed booking now sends the browser back to the dashboard before the worker pauses, so the user lands on a stable page for manual follow-up.
 
 After the worker reports `COMPLETED`, the backend queues email notification jobs for all active administrators through the existing notification service. The worker now also emits structured `DATE_SELECTED` and `SLOT_SELECTED` messages so the email payload can include the booked date and time slot when available.
 
@@ -124,7 +128,8 @@ In RESCHEDULE mode, the worker:
 3. Handles any confirmation dialog.
 4. Hunts dates and slots.
 5. Rechecks the Applicant list checkbox.
-6. Clicks BOOK POST APPOINTMENT.
-7. Exits only if the browser actually redirects.
+6. Clicks BOOK POST APPOINTMENT at most twice, with a 2-second gap between attempts.
+7. Returns to the dashboard after a confirmed booking.
+8. Pauses there for manual verification.
 
 The two modes diverge at entry and final button text, but otherwise share the same defensive recovery rules.

@@ -101,7 +101,7 @@ const CONFIG = {
   ),
   HOT_BURST_OUTCOME_TIMEOUT_MS: Math.max(
     250,
-    Number(process.env.VISA_HOT_BURST_OUTCOME_TIMEOUT_MS) || 700,
+    Number(process.env.VISA_HOT_BURST_OUTCOME_TIMEOUT_MS) || 350,
   ),
   HOT_FINAL_OUTCOME_POLL_MS: Math.max(
     90,
@@ -2238,7 +2238,6 @@ async function clickBookPostAppointmentButton(page) {
   const result = await clickExactActionButton(page, "BOOK POST APPOINTMENT", {
     timeoutMs: 15000,
     maxAttempts: 2,
-    attemptGapMs: 2000,
   });
 
   if (!result) return false;
@@ -2285,7 +2284,6 @@ async function safeClickProceed(page) {
     {
       timeoutMs: 15000,
       maxAttempts: 2,
-      attemptGapMs: 2000,
     },
   ).catch(() => null);
 
@@ -2295,6 +2293,94 @@ async function safeClickProceed(page) {
 
   status("PROCEED", "SELECT POST AND PROCEED button not found/ready");
   return false;
+}
+
+function buildFinalActionCandidates(page, targetText) {
+  const normalizedTarget = String(targetText || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const exactPattern = new RegExp(
+    `^\\s*${escapeRegExp(normalizedTarget)}\\s*$`,
+    "i",
+  );
+  const fuzzyPattern = new RegExp(escapeRegExp(normalizedTarget), "i");
+  const scoped = page.locator(".ofc-book-slot-block").first();
+
+  const roots = [
+    { root: scoped, label: "scoped" },
+    { root: page, label: "global" },
+  ];
+  const selectors = [
+    { selector: "button", label: "button" },
+    { selector: "a", label: "link" },
+    { selector: "[role='button']", label: "role button" },
+  ];
+
+  const candidates = [];
+  for (const { root, label: rootLabel } of roots) {
+    for (const { selector, label: selectorLabel } of selectors) {
+      const locator = root.locator(selector);
+      candidates.push({
+        label: `${rootLabel} ${selectorLabel} exact`,
+        locator: locator.filter({ hasText: exactPattern }).first(),
+      });
+      candidates.push({
+        label: `${rootLabel} ${selectorLabel} text`,
+        locator: locator.filter({ hasText: fuzzyPattern }).first(),
+      });
+    }
+  }
+
+  return candidates;
+}
+
+async function clickFinalActionCandidate(
+  page,
+  candidate,
+  { timeoutMs = 1500, strategy = "locator" } = {},
+) {
+  const locator = candidate?.locator;
+  if (!locator) return false;
+
+  const visible = await locator
+    .waitFor({ state: "visible", timeout: timeoutMs })
+    .then(() => true)
+    .catch(() => false);
+  if (!visible) return false;
+
+  await locator.scrollIntoViewIfNeeded().catch(() => {});
+  await locator.hover({ timeout: timeoutMs, force: true }).catch(() => {});
+  await locator.focus().catch(() => {});
+  await page.waitForTimeout(CONFIG.HOT_FINAL_BURST_DELAY_MS).catch(() => {});
+
+  if (strategy === "dom") {
+    return locator
+      .evaluate((element) => {
+        element.dispatchEvent(
+          new MouseEvent("mousedown", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }),
+        );
+        element.dispatchEvent(
+          new MouseEvent("mouseup", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }),
+        );
+        element.focus?.();
+        element.click();
+      })
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  return locator
+    .click({ timeout: timeoutMs, force: true })
+    .then(() => true)
+    .catch(() => false);
 }
 
 async function clickExactActionButton(
@@ -2310,98 +2396,146 @@ async function clickExactActionButton(
   if (!targetText) return null;
 
   const clickLimit = Math.max(1, Math.min(2, Number(maxAttempts) || 2));
-  const minimumGapMs = Math.max(2000, Number(attemptGapMs) || 2000);
-  const effectiveTimeoutMs = timeoutMs;
-  const outcomeTimeoutMs = Math.min(
-    Math.max(250, CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS),
-    minimumGapMs,
+  const minimumGapMs = Math.max(
+    0,
+    Number.isFinite(Number(attemptGapMs))
+      ? Number(attemptGapMs)
+      : CONFIG.HOT_FINAL_BURST_DELAY_MS,
   );
+  const effectiveTimeoutMs = timeoutMs;
+  const outcomeTimeoutMs = Math.max(1000, CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS);
+  const burstOutcomeTimeoutMs = Math.max(
+    250,
+    CONFIG.HOT_BURST_OUTCOME_TIMEOUT_MS,
+  );
+  const burstOutcomePollMs = Math.max(
+    50,
+    Math.min(CONFIG.HOT_FINAL_OUTCOME_POLL_MS, 75),
+  );
+  const candidates = buildFinalActionCandidates(page, targetText);
 
-  const clickTargetOnce = async () =>
-    clickTextCandidate(page, targetText, {
-      timeoutMs: Math.min(2000, effectiveTimeoutMs),
-      selectors: ["button", "a", "[role='button']"],
-      scope: ".ofc-book-slot-block",
-    });
+  if (page.isClosed()) {
+    status(
+      "FINAL_REDIRECT",
+      "Page closed before final action could be clicked",
+    );
+    return null;
+  }
+
+  const slotUrlPattern = /\/home\/appointment\/slot(?:[/?#]|$)/i;
+  const beforeUrl = page.url();
+  let lastClickedText = null;
+
+  if (!candidates.length) {
+    status(
+      "FINAL_ACTION",
+      `No final button candidates found for ${targetText}`,
+    );
+    return null;
+  }
 
   for (let attempt = 0; attempt < clickLimit; attempt += 1) {
     if (page.isClosed()) {
       status(
         "FINAL_REDIRECT",
-        "Page closed before final action could be clicked",
+        "Page closed while handling the final action click",
       );
-      return null;
+      return lastClickedText || targetText;
     }
 
-    const attemptStartedAt = Date.now();
-    const beforeUrl = page.url();
+    const candidate = candidates[Math.min(attempt, candidates.length - 1)];
+    const strategy = attempt === 0 ? "locator" : "dom";
+    const clicked = candidate
+      ? await clickFinalActionCandidate(page, candidate, {
+          timeoutMs: Math.min(1500, effectiveTimeoutMs),
+          strategy,
+        }).catch(() => false)
+      : false;
 
-    // eslint-disable-next-line no-await-in-loop
-    const clickedText = await clickTargetOnce();
-    if (!clickedText) {
+    if (!clicked) {
       status(
         "FINAL_ACTION",
         `No final button click yet for ${targetText}; attempt ${attempt + 1} of ${clickLimit}`,
       );
-    } else {
-      status(
-        "FINAL_ACTION",
-        `Clicked ${clickedText}; waiting for toast or redirect`,
-      );
-
-      // eslint-disable-next-line no-await-in-loop
-      const outcome = await waitForFinalActionOutcome(
-        page,
-        beforeUrl,
-        outcomeTimeoutMs,
-        CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
-      ).catch(() => null);
-
-      if (outcome === "booking") {
-        status(
-          "BOOKING_TOAST",
-          "Appointment Booked Successfully toast detected",
-        );
-        return clickedText;
-      }
-
-      if (outcome === "applicant") {
-        status(
-          "APPLICANT",
-          "Applicant toast detected; rechecking the checkbox before the next click",
-        );
+      if (attempt + 1 < clickLimit && minimumGapMs > 0) {
         // eslint-disable-next-line no-await-in-loop
-        await ensureApplicantChecked(page, { attempts: 2, delayMs: 150 }).catch(
-          () => false,
-        );
-      } else {
-        status(
-          "FINAL_ACTION_WAIT",
-          `Clicked ${clickedText} but no toast or redirect appeared yet; url=${page.url()}`,
-        );
-
-        if (page.isClosed()) {
-          status(
-            "FINAL_REDIRECT",
-            "Page closed after final action; treating as completed booking flow",
-          );
-          return clickedText;
-        }
+        await page.waitForTimeout(minimumGapMs).catch(() => {});
       }
+      continue;
     }
 
-    if (attempt < clickLimit - 1) {
-      const elapsed = Date.now() - attemptStartedAt;
-      const remainingGap = Math.max(0, minimumGapMs - elapsed);
+    lastClickedText = targetText;
+    status(
+      "FINAL_ACTION",
+      attempt === 0
+        ? `Primed ${targetText} with hover + press; checking for a fast response`
+        : `Retried ${targetText} on the next selectable option; checking for a fast response`,
+    );
+
+    // eslint-disable-next-line no-await-in-loop
+    const burstOutcome = await waitForFinalActionOutcome(
+      page,
+      beforeUrl,
+      burstOutcomeTimeoutMs,
+      burstOutcomePollMs,
+      0,
+    ).catch(() => null);
+
+    if (burstOutcome === "booking") {
+      status("BOOKING_TOAST", "Appointment Booked Successfully toast detected");
+      return lastClickedText;
+    }
+
+    if (burstOutcome === "applicant") {
+      status(
+        "APPLICANT",
+        "Applicant toast detected; rechecking the checkbox before retrying",
+      );
       // eslint-disable-next-line no-await-in-loop
-      await page.waitForTimeout(remainingGap).catch(() => {});
+      await ensureApplicantChecked(page, { attempts: 1, delayMs: 0 }).catch(
+        () => false,
+      );
+    }
+
+    if (attempt + 1 < clickLimit) {
+      status(
+        "FINAL_ACTION",
+        `No action yet for ${targetText}; retrying with the next selectable option`,
+      );
+      if (minimumGapMs > 0) {
+        // eslint-disable-next-line no-await-in-loop
+        await page.waitForTimeout(minimumGapMs).catch(() => {});
+      }
     }
   }
 
-  status(
-    "FINAL_ACTION_WAIT",
-    `Final action not confirmed after ${clickLimit} attempt(s)`,
-  );
+  const outcome = await waitForFinalActionOutcome(
+    page,
+    beforeUrl,
+    outcomeTimeoutMs,
+    CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
+  ).catch(() => null);
+
+  if (outcome === "booking") {
+    status("BOOKING_TOAST", "Appointment Booked Successfully toast detected");
+    return lastClickedText || targetText;
+  }
+
+  if (outcome === "applicant") {
+    status(
+      "APPLICANT",
+      "Applicant toast detected; rechecking the checkbox after the double click",
+    );
+    // eslint-disable-next-line no-await-in-loop
+    await ensureApplicantChecked(page, { attempts: 2, delayMs: 150 }).catch(
+      () => false,
+    );
+  } else {
+    status(
+      "FINAL_ACTION_WAIT",
+      `Final action not confirmed after ${clickLimit} click(s); url=${page.url()}`,
+    );
+  }
 
   return null;
 }
@@ -2411,12 +2545,16 @@ async function waitForFinalActionOutcome(
   beforeUrl,
   timeoutMs = 10000,
   pollIntervalMs = 100,
+  toastStableMs = 500,
 ) {
   const start = Date.now();
   let bookingToastSeenAt = null;
   let applicantToastSeenAt = null;
   const initialUrl = String(beforeUrl || page.url() || "");
   const slotUrlPattern = /\/home\/appointment\/slot(?:[/?#]|$)/i;
+  const stableToastMs = Number.isFinite(Number(toastStableMs))
+    ? Math.max(0, Number(toastStableMs))
+    : 500;
 
   while (Date.now() - start < timeoutMs) {
     if (page.isClosed()) {
@@ -2444,9 +2582,12 @@ async function waitForFinalActionOutcome(
     if (bookingToastVisible) {
       if (bookingToastSeenAt === null) {
         bookingToastSeenAt = Date.now();
+        if (stableToastMs === 0) {
+          return "booking";
+        }
       } else if (
         Date.now() - bookingToastSeenAt >=
-        Math.max(500, pollIntervalMs * 2)
+        Math.max(stableToastMs, pollIntervalMs)
       ) {
         return "booking";
       }
@@ -2458,9 +2599,12 @@ async function waitForFinalActionOutcome(
     if (toastVisible) {
       if (applicantToastSeenAt === null) {
         applicantToastSeenAt = Date.now();
+        if (stableToastMs === 0) {
+          return "applicant";
+        }
       } else if (
         Date.now() - applicantToastSeenAt >=
-        Math.max(500, pollIntervalMs * 2)
+        Math.max(stableToastMs, pollIntervalMs)
       ) {
         return "applicant";
       }
