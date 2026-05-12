@@ -2330,7 +2330,9 @@ function buildFinalActionCandidates(page, targetText) {
     { root: page, label: "global" },
   ];
   const selectors = [
+    { selector: "button.light-lanvander-button", label: "light button" },
     { selector: "button[appdebounceclick]", label: "debounce button" },
+    { selector: ".group-data-holder button", label: "group button" },
     { selector: "button.lrg-common-buttton", label: "common button" },
     { selector: "button", label: "button" },
     { selector: "a", label: "link" },
@@ -2404,10 +2406,218 @@ async function clickFinalActionCandidate(
     .catch(() => false);
 }
 
+async function triggerInstantFinalClicker(
+  page,
+  expectedText,
+  { selectors = [], spamDurationMs = 320, spamIntervalMs = 12 } = {},
+) {
+  return page.evaluate(
+    ({ selectors: selectorList, text, spamDuration, spamInterval }) => {
+      if (!document.body) {
+        return { found: false, fired: false };
+      }
+
+      const state = (window.__instantFinalClickerState ||= {
+        observerInstalled: false,
+        bursting: false,
+      });
+
+      const normalize = (value) =>
+        String(value || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toUpperCase();
+
+      const isVisible = (element) => {
+        if (!element) return false;
+
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          rect.width > 0 &&
+          rect.height > 0
+        );
+      };
+
+      const removeBlockingOverlays = () => {
+        const overlaySelectors = [
+          ".cdk-overlay-backdrop",
+          ".cdk-overlay-container",
+          ".cdk-global-overlay-wrapper",
+          ".ngx-spinner-overlay",
+          ".loading",
+          ".loader",
+          ".spinner",
+          ".overlay",
+          ".modal-backdrop",
+          ".blockUI",
+        ];
+
+        overlaySelectors.forEach((selector) => {
+          document.querySelectorAll(selector).forEach((overlay) => {
+            overlay.style.pointerEvents = "none";
+            overlay.style.opacity = "0";
+            overlay.style.display = "none";
+            overlay.remove?.();
+          });
+        });
+      };
+
+      state.selectors = Array.isArray(selectorList) ? selectorList : [];
+      state.text = normalize(text);
+      state.spamDurationMs = Number.isFinite(Number(spamDuration))
+        ? Math.max(0, Number(spamDuration))
+        : 320;
+      state.spamIntervalMs = Number.isFinite(Number(spamInterval))
+        ? Math.max(1, Number(spamInterval))
+        : 12;
+
+      state.getFinalButton = () => {
+        for (const selector of state.selectors) {
+          const elements = Array.from(document.querySelectorAll(selector));
+
+          for (const element of elements) {
+            const buttonText = normalize(
+              element.innerText ||
+                element.textContent ||
+                element.getAttribute("aria-label") ||
+                "",
+            );
+
+            if (isVisible(element) && buttonText.includes(state.text)) {
+              return element;
+            }
+          }
+        }
+
+        return null;
+      };
+
+      state.realClick = (button) => {
+        if (!button) return false;
+
+        removeBlockingOverlays();
+
+        button.scrollIntoView({ block: "center", inline: "center" });
+        button.style.transition = "none";
+        button.style.background = "#f1f1f1";
+        button.style.opacity = "1";
+        button.style.pointerEvents = "auto";
+
+        const rect = button.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+
+        const events = [
+          "pointerover",
+          "pointerenter",
+          "mouseover",
+          "mouseenter",
+          "pointerdown",
+          "mousedown",
+          "pointerup",
+          "mouseup",
+          "click",
+        ];
+
+        events.forEach((eventName) => {
+          const event = eventName.startsWith("pointer")
+            ? new PointerEvent(eventName, {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                pointerType: "mouse",
+                isPrimary: true,
+                clientX: x,
+                clientY: y,
+              })
+            : new MouseEvent(eventName, {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                clientX: x,
+                clientY: y,
+              });
+
+          button.dispatchEvent(event);
+        });
+
+        button.focus?.();
+        button.click();
+
+        return true;
+      };
+
+      state.spamClickFinalButton = () => {
+        if (state.bursting) {
+          return false;
+        }
+
+        state.bursting = true;
+        const started = Date.now();
+
+        const tick = () => {
+          const button = state.getFinalButton();
+          if (button) {
+            state.realClick(button);
+          }
+
+          if (Date.now() - started >= state.spamDurationMs) {
+            state.bursting = false;
+            return;
+          }
+
+          window.setTimeout(tick, state.spamIntervalMs);
+        };
+
+        tick();
+        return true;
+      };
+
+      if (!state.observerInstalled) {
+        state.observerInstalled = true;
+        state.observer = new MutationObserver(() => {
+          const button = state.getFinalButton();
+          if (button && !state.bursting) {
+            state.spamClickFinalButton();
+          }
+        });
+
+        state.observer.observe(document.body, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          attributeFilter: ["class", "style", "disabled", "aria-disabled"],
+        });
+      }
+
+      const button = state.getFinalButton();
+      const fired = state.spamClickFinalButton();
+
+      return { found: Boolean(button), fired };
+    },
+    {
+      selectors,
+      text: expectedText,
+      spamDuration: spamDurationMs,
+      spamInterval: spamIntervalMs,
+    },
+  );
+}
+
 async function clickExactActionButton(
   page,
   expectedText,
-  { timeoutMs = 15000, maxAttempts = 2, attemptGapMs = 2000 } = {},
+  {
+    timeoutMs = 15000,
+    spamDurationMs = 320,
+    spamIntervalMs = 12,
+    maxAttempts = 2,
+    attemptGapMs = 0,
+  } = {},
 ) {
   const targetText = String(expectedText || "")
     .replace(/\s+/g, " ")
@@ -2419,21 +2629,22 @@ async function clickExactActionButton(
   const clickLimit = Math.max(1, Math.min(2, Number(maxAttempts) || 2));
   const minimumGapMs = Math.max(
     0,
-    Number.isFinite(Number(attemptGapMs))
-      ? Number(attemptGapMs)
-      : CONFIG.HOT_FINAL_BURST_DELAY_MS,
+    Number.isFinite(Number(attemptGapMs)) ? Number(attemptGapMs) : 0,
   );
-  const effectiveTimeoutMs = timeoutMs;
-  const outcomeTimeoutMs = Math.max(1000, CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS);
+  const outcomeTimeoutMs = Math.max(700, CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS);
   const burstOutcomeTimeoutMs = Math.max(
     250,
     CONFIG.HOT_BURST_OUTCOME_TIMEOUT_MS,
   );
-  const burstOutcomePollMs = Math.max(
-    50,
-    Math.min(CONFIG.HOT_FINAL_OUTCOME_POLL_MS, 75),
-  );
-  const candidates = buildFinalActionCandidates(page, targetText);
+  const burstOutcomePollMs = 40;
+  const finalButtonSelectors = [
+    "button.light-lanvander-button",
+    "button[appdebounceclick]",
+    ".group-data-holder button",
+    "button.lrg-common-buttton",
+    "button.cursor-pointer-hover",
+    "button",
+  ];
 
   if (page.isClosed()) {
     status(
@@ -2443,16 +2654,15 @@ async function clickExactActionButton(
     return null;
   }
 
-  const slotUrlPattern = /\/home\/appointment\/slot(?:[/?#]|$)/i;
   const beforeUrl = page.url();
+  const candidates = buildFinalActionCandidates(page, targetText);
   let lastClickedText = null;
 
   if (!candidates.length) {
     status(
       "FINAL_ACTION",
-      `No final button candidates found for ${targetText}`,
+      `No final button candidates found yet for ${targetText}; arming the full click burst anyway`,
     );
-    return null;
   }
 
   for (let attempt = 0; attempt < clickLimit; attempt += 1) {
@@ -2464,19 +2674,16 @@ async function clickExactActionButton(
       return lastClickedText || targetText;
     }
 
-    const candidate = candidates[Math.min(attempt, candidates.length - 1)];
-    const strategy = attempt === 0 ? "locator" : "dom";
-    const clicked = candidate
-      ? await clickFinalActionCandidate(page, candidate, {
-          timeoutMs: Math.min(1500, effectiveTimeoutMs),
-          strategy,
-        }).catch(() => false)
-      : false;
+    const clickState = await triggerInstantFinalClicker(page, targetText, {
+      selectors: finalButtonSelectors,
+      spamDurationMs,
+      spamIntervalMs,
+    }).catch(() => null);
 
-    if (!clicked) {
+    if (!clickState) {
       status(
         "FINAL_ACTION",
-        `No final button click yet for ${targetText}; attempt ${attempt + 1} of ${clickLimit}`,
+        `Unable to arm the full click burst for ${targetText}; attempt ${attempt + 1} of ${clickLimit}`,
       );
       if (attempt + 1 < clickLimit && minimumGapMs > 0) {
         // eslint-disable-next-line no-await-in-loop
@@ -2488,9 +2695,11 @@ async function clickExactActionButton(
     lastClickedText = targetText;
     status(
       "FINAL_ACTION",
-      attempt === 0
-        ? `Primed ${targetText} with hover + press; checking for a fast response`
-        : `Retried ${targetText} on the next selectable option; checking for a fast response`,
+      clickState.found
+        ? attempt === 0
+          ? `Fired a full click burst for ${targetText}`
+          : `Re-fired a full click burst for ${targetText}`
+        : `Armed a full click burst for ${targetText} and waiting for the button to settle`,
     );
 
     // eslint-disable-next-line no-await-in-loop
@@ -2518,15 +2727,9 @@ async function clickExactActionButton(
       );
     }
 
-    if (attempt + 1 < clickLimit) {
-      status(
-        "FINAL_ACTION",
-        `No action yet for ${targetText}; retrying with the next selectable option`,
-      );
-      if (minimumGapMs > 0) {
-        // eslint-disable-next-line no-await-in-loop
-        await page.waitForTimeout(minimumGapMs).catch(() => {});
-      }
+    if (attempt + 1 < clickLimit && minimumGapMs > 0) {
+      // eslint-disable-next-line no-await-in-loop
+      await page.waitForTimeout(minimumGapMs).catch(() => {});
     }
   }
 
