@@ -941,7 +941,7 @@ async function clickRescheduleConfirmDialog(page, dialogLocator) {
 }
 
 async function waitForAppointmentBookingPageReady(page, timeoutMs = 60000) {
-  const bookingBlock = page.locator(".ofc-book-slot-block").first();
+  const bookingBlock = getBookingBlockLocator(page);
   try {
     await bookingBlock.waitFor({ state: "visible", timeout: timeoutMs });
   } catch {
@@ -950,7 +950,7 @@ async function waitForAppointmentBookingPageReady(page, timeoutMs = 60000) {
 
   await page
     .locator(
-      ".ofc-book-slot-block mat-select[panelclass*='drop-down-panelcls'], .ofc-book-slot-block mat-select",
+      ".ofc-book-slot-block mat-select[panelclass*='drop-down-panelcls'], .ofc-book-slot-block mat-select, .ofc-appoinment-sloat-block mat-select[panelclass*='drop-down-panelcls'], .ofc-appoinment-sloat-block mat-select, .ofc-appointment-sloat-block mat-select[panelclass*='drop-down-panelcls'], .ofc-appointment-sloat-block mat-select, .ofc-appointment-slot-block mat-select[panelclass*='drop-down-panelcls'], .ofc-appointment-slot-block mat-select",
     )
     .first()
     .waitFor({ state: "visible", timeout: 30000 })
@@ -1440,7 +1440,11 @@ async function hasBookingSuccessToast(page) {
 }
 
 function getBookingBlockLocator(page) {
-  return page.locator(".ofc-book-slot-block").first();
+  return page
+    .locator(
+      ".ofc-book-slot-block, .ofc-appoinment-sloat-block, .ofc-appointment-sloat-block, .ofc-appointment-slot-block",
+    )
+    .first();
 }
 
 async function clickFirstGreenDate(page) {
@@ -2319,13 +2323,15 @@ function buildFinalActionCandidates(page, targetText) {
     "i",
   );
   const fuzzyPattern = new RegExp(escapeRegExp(normalizedTarget), "i");
-  const scoped = page.locator(".ofc-book-slot-block").first();
+  const scoped = getBookingBlockLocator(page);
 
   const roots = [
     { root: scoped, label: "scoped" },
     { root: page, label: "global" },
   ];
   const selectors = [
+    { selector: "button[appdebounceclick]", label: "debounce button" },
+    { selector: "button.lrg-common-buttton", label: "common button" },
     { selector: "button", label: "button" },
     { selector: "a", label: "link" },
     { selector: "[role='button']", label: "role button" },
@@ -2794,15 +2800,6 @@ async function attemptBooking(page) {
     return "date";
   }
 
-  status("APPLICANT", "Rechecking applicant checkbox before final action");
-  await ensureApplicantChecked(
-    page,
-    CONFIG.RESCHEDULE
-      ? { attempts: 2, delayMs: 200 }
-      : { attempts: 2, delayMs: 150 },
-  ).catch(() => false);
-
-  // Reschedule flow: immediately click BOOK POST APPOINTMENT.
   if (CONFIG.RESCHEDULE) {
     status("BOOK", "Clicking BOOK POST APPOINTMENT");
     const booked = await clickBookPostAppointmentButton(page).catch(
