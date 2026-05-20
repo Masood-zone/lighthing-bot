@@ -2261,7 +2261,7 @@ async function clickBookPostAppointmentButton(page) {
 
   if (!result) return false;
 
-  status("BOOK", `Clicked ${result}`);
+  status("BOOK", `Submitted ${result}`);
   return true;
 }
 
@@ -2307,6 +2307,7 @@ async function safeClickProceed(page) {
   ).catch(() => null);
 
   if (success) {
+    status("PROCEED", `Submitted ${success}`);
     return true;
   }
 
@@ -2627,16 +2628,6 @@ async function clickExactActionButton(
   if (!targetText) return null;
 
   const clickLimit = Math.max(1, Math.min(2, Number(maxAttempts) || 2));
-  const minimumGapMs = Math.max(
-    0,
-    Number.isFinite(Number(attemptGapMs)) ? Number(attemptGapMs) : 0,
-  );
-  const outcomeTimeoutMs = Math.max(700, CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS);
-  const burstOutcomeTimeoutMs = Math.max(
-    250,
-    CONFIG.HOT_BURST_OUTCOME_TIMEOUT_MS,
-  );
-  const burstOutcomePollMs = 40;
   const finalButtonSelectors = [
     "button.light-lanvander-button",
     "button[appdebounceclick]",
@@ -2654,7 +2645,6 @@ async function clickExactActionButton(
     return null;
   }
 
-  const beforeUrl = page.url();
   const candidates = buildFinalActionCandidates(page, targetText);
   let lastClickedText = null;
 
@@ -2694,72 +2684,21 @@ async function clickExactActionButton(
 
     lastClickedText = targetText;
     status(
-      "FINAL_ACTION",
+      "FINAL_ACTION_CLICKED",
       clickState.found
         ? attempt === 0
-          ? `Fired a full click burst for ${targetText}`
-          : `Re-fired a full click burst for ${targetText}`
-        : `Armed a full click burst for ${targetText} and waiting for the button to settle`,
+          ? `Clicked ${targetText}; accepting submission immediately`
+          : `Re-clicked ${targetText}; accepting submission immediately`
+        : `Armed a full click burst for ${targetText}; accepting submission immediately`,
     );
 
-    // eslint-disable-next-line no-await-in-loop
-    const burstOutcome = await waitForFinalActionOutcome(
-      page,
-      beforeUrl,
-      burstOutcomeTimeoutMs,
-      burstOutcomePollMs,
-      0,
-    ).catch(() => null);
-
-    if (burstOutcome === "booking") {
-      status("BOOKING_TOAST", "Appointment Booked Successfully toast detected");
-      return lastClickedText;
-    }
-
-    if (burstOutcome === "applicant") {
-      status(
-        "APPLICANT",
-        "Applicant toast detected; rechecking the checkbox before retrying",
-      );
-      // eslint-disable-next-line no-await-in-loop
-      await ensureApplicantChecked(page, { attempts: 1, delayMs: 0 }).catch(
-        () => false,
-      );
-    }
-
-    if (attempt + 1 < clickLimit && minimumGapMs > 0) {
-      // eslint-disable-next-line no-await-in-loop
-      await page.waitForTimeout(minimumGapMs).catch(() => {});
-    }
-  }
-
-  const outcome = await waitForFinalActionOutcome(
-    page,
-    beforeUrl,
-    outcomeTimeoutMs,
-    CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
-  ).catch(() => null);
-
-  if (outcome === "booking") {
-    status("BOOKING_TOAST", "Appointment Booked Successfully toast detected");
     return lastClickedText || targetText;
   }
 
-  if (outcome === "applicant") {
-    status(
-      "APPLICANT",
-      "Applicant toast detected; rechecking the checkbox after the double click",
-    );
-    // eslint-disable-next-line no-await-in-loop
-    await ensureApplicantChecked(page, { attempts: 2, delayMs: 150 }).catch(
-      () => false,
-    );
-  } else {
-    status(
-      "FINAL_ACTION_WAIT",
-      `Final action not confirmed after ${clickLimit} click(s); url=${page.url()}`,
-    );
-  }
+  status(
+    "FINAL_ACTION_WAIT",
+    `Final action not clicked after ${clickLimit} click(s); url=${page.url()}`,
+  );
 
   return null;
 }
