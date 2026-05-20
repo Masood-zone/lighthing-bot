@@ -1,202 +1,174 @@
-# Visa Booking Bot — Algorithm (Selenium Worker)
+# Visa Booking Bot - Algorithm (Playwright Worker)
 
-This file documents the _actual runtime algorithm_ executed by the Selenium worker and how it interacts with the backend.
+This file documents the runtime algorithm executed by the Playwright worker in `backend/main/index.js` and how it interacts with the backend.
 
 ## Files involved
 
 - API server: `backend/src/server.js`
-- Worker pool (forks workers, receives statuses): `backend/src/queue/workerPool.js`
-- Worker entry (fork target): `backend/src/workerEntry.js`
-- Selenium worker (the algorithm): `backend/main/visa-bot.js`
+- Worker pool that forks workers and receives statuses: `backend/src/queue/workerPool.js`
+- Worker entry used as the fork target: `backend/src/workerEntry.js`
+- Booking worker algorithm: `backend/main/index.js`
 - Admin email notifications: `backend/src/services/notifications.js`
 
 ## Configuration inputs (what controls behavior)
 
 ### Worker environment variables (core)
 
-- `VISA_PLATFORM_URL` — login URL (defaults to the usvisaappt login route)
+- `VISA_PLATFORM_URL` - login URL, defaulting to the usvisaappt login route
 - `VISA_USER_EMAIL`, `VISA_USER_PASSWORD`, `VISA_USER_DISPLAY_NAME`
-- `VISA_PICKUP_POINT` (default: `Accra`)
-- `VISA_RESCHEDULE` — `true|false`
-- `VISA_HEADLESS` — `true|false`
-- `VISA_PROFILE_DIR` — Chrome user-data-dir path (set by the server per session)
-- `VISA_SESSION_ID` — used for backend logs/status association
-- `PROXY_HOST` / `PROXY_API_KEY` — Proxy11 rotator API endpoint and key used to fetch the proxy list
-- `PROXY_PORT` — optional fallback port when the API response omits a port value
-- `VISA_PROXY_URL` — optional proxy for a worker (format: `http[s]://user:pass@host:port` or `socks5://host:port`)
-- `VISA_PROXY_POOL` — legacy fallback comma/newline-separated list of proxy URLs
-- `VISA_PROXY_POOL_FILE` — legacy fallback path to a text file with one proxy URL per line
-- `VISA_PROXY_BYPASS` — optional bypass list passed to Playwright (comma-separated host globs)
+- `VISA_PICKUP_POINT` - pickup location used in the pending flow
+- `VISA_RESCHEDULE` - switches between pending booking and reschedule booking
+- `VISA_HEADLESS` - runs Chrome headless when enabled
+- `VISA_PROFILE_DIR` - Chrome user-data-dir path supplied per session
+- `VISA_SESSION_ID` - used for backend logs and status association
+- `PROXY_HOST` / `PROXY_API_KEY` - Proxy11 rotator endpoint and key
+- `PROXY_PORT` - fallback port when the proxy API omits one
+- `VISA_PROXY_URL` - single-proxy fallback in standard proxy URL format
+- `VISA_PROXY_POOL` / `VISA_PROXY_POOL_FILE` - legacy proxy fallbacks
+- `VISA_PROXY_BYPASS` - optional bypass list passed to Playwright
 
-Proxy11 is now the primary rotator. On worker start, the backend requests `PROXY_HOST?key=PROXY_API_KEY`, reads up to 50 proxy records from the response, and assigns one proxy per active session before Chrome launches. Each worker gets a distinct `VISA_PROXY_URL` like `http://185.238.228.22:80` and the assignment is logged.
-
-If you prefer to manage the pool outside the environment file, the legacy `backend/data/proxy-pool.txt` fallback is still supported when Proxy11 is unavailable.
-
-Individual sessions may also carry a stored `proxyUrl` override. When present and Proxy11 is unavailable, that worker can still use the stored proxy directly.
-
-The backend logs which Proxy11 entry was assigned to each session using a sanitized proxy label and short fingerprint. That lets you verify that concurrent browser sessions are being spread across different proxy entries without exposing credentials in the logs.
-
-When multiple sessions run at once, Proxy11 is the setting that spreads them across different IPs. `VISA_PROXY_URL` is now only a single-proxy fallback and will still send every session through the same IP if Proxy11 and the legacy pool are not configured.
-For best isolation, keep the Proxy11 response set at least as large as `MAX_CONCURRENT`; otherwise the rotator may eventually reuse an IP when all available proxies are already reserved.
+The backend prefers Proxy11 for multi-session isolation. On worker start it requests `PROXY_HOST?key=PROXY_API_KEY`, reserves a proxy for the session, and passes the resulting `VISA_PROXY_URL` to Playwright before Chrome launches. If Proxy11 is unavailable, the worker falls back to the stored proxy, `VISA_PROXY_POOL`, `backend/data/proxy-pool.txt`, or the single `VISA_PROXY_URL`.
 
 ### Date-range filtering (green dates must be inside this window)
 
-Preferred:
-
-- `VISA_MIN_DATE` / `VISA_MAX_DATE` (format: `YYYY-MM-DD`)
-
-Fallback:
-
-- `VISA_DATE_START` / `VISA_DATE_END` (format: `YYYY-MM-DD`)
+- Preferred: `VISA_MIN_DATE` / `VISA_MAX_DATE` in `YYYY-MM-DD` format
+- Fallback: `VISA_DATE_START` / `VISA_DATE_END` in `YYYY-MM-DD` format
 
 ### Attempt pacing / rate limiting
 
-- `VISA_ATTEMPT_INTERVAL_MS` (default: `2000`)
-- `VISA_ATTEMPT_WINDOW_MS` (default: `60*60*1000`)
-- `VISA_ATTEMPTS_PER_WINDOW` (default: `1800`)
+- `VISA_ATTEMPT_INTERVAL_MS`
+- `VISA_ATTEMPT_WINDOW_MS`
+- `VISA_ATTEMPTS_PER_WINDOW`
 
 ### Server-side worker capacity
 
-- `MAX_CONCURRENT` — how many sessions can run at once
-- `FORCE_VISIBLE_BROWSER=true` — forces workers to run non-headless (overrides session setting)
+- `MAX_CONCURRENT` - how many sessions can run at once
+- `FORCE_VISIBLE_BROWSER=true` - forces workers to run visible even if the session prefers headless
 
-## End-to-end algorithm (what the bot does)
+### Hot-path tuning
+
+The worker also honors the tighter runtime values used by the current algorithm:
+
+- `VISA_HOT_SCAN_SETTLE_MS`
+- `VISA_HOT_MONTH_CHANGE_WAIT_MS`
+- `VISA_HOT_MONTH_READY_WAIT_MS`
+- `VISA_HOT_SLOT_READY_TIMEOUT_MS`
+- `VISA_HOT_SLOT_CLICK_TIMEOUT_MS`
+- `VISA_HOT_SLOT_RETRY_LIMIT`
+- `VISA_HOT_FINAL_OUTCOME_TIMEOUT_MS`
+- `VISA_HOT_BURST_OUTCOME_TIMEOUT_MS`
+- `VISA_HOT_FINAL_OUTCOME_POLL_MS`
+- `VISA_HOT_FINAL_BURST_DELAY_MS`
+- `VISA_PICKUP_REFRESH_COOLDOWN_MS`
+- `VISA_PICKUP_REFRESH_AFTER_MISSES`
+
+## End-to-end algorithm (what the worker does)
 
 ### 1) Startup (backend)
 
-1. Backend starts (`backend/src/server.js`).
+1. Backend starts from `backend/src/server.js`.
 2. `WorkerPool` forks `backend/src/workerEntry.js` for a session.
-3. Worker entry loads the algorithm (`require("../main/visa-bot")`).
+3. Worker entry loads the booking algorithm from `backend/main/index.js`.
 
 ### 2) Login (worker)
 
 1. Worker opens Chrome and navigates to `VISA_PLATFORM_URL`.
-2. Worker fills email + password.
+2. Worker fills email and password.
 3. Human solves CAPTCHA and clicks **SIGN IN**.
-4. Worker waits until dashboard is detected.
+4. Worker waits until the dashboard is detected.
 
 ### 3) Navigate to appointment booking page
 
-- If `VISA_RESCHEDULE=false` (PENDING mode):
-  1. Go to dashboard.
-  2. Click the **PENDING APPOINTMENT REQUEST** tile.
-  3. Wait until the booking block `.ofc-book-slot-block` fully loads.
+- If `VISA_RESCHEDULE=false` (pending mode):
+  1. Go to the dashboard.
+  2. Click the pending appointment tile.
+  3. Wait until the booking block fully loads.
 
-- If `VISA_RESCHEDULE=true` (RESCHEDULE mode):
-  1. Navigate directly to **My Appointments**.
-  2. Click **RESCHEDULE**.
-  3. Confirm in the modal.
-  4. Wait until the booking block `.ofc-book-slot-block` fully loads.
+- If `VISA_RESCHEDULE=true` (reschedule mode):
+  1. Navigate directly to My Appointments.
+  2. Click RESCHEDULE.
+  3. Confirm the dialog.
+  4. Wait until the booking block fully loads.
 
 ### 4) Monitoring loop (repeats until booked)
 
-The main loop is `appointmentWatcher()`.
+The main loop is `attemptBooking()` inside the worker's outer retry loop.
 
 On each cycle:
 
-1. Ensure the browser is on the booking page (`.ofc-book-slot-block` exists). If not, navigate there (this navigation is **not** counted as an attempt).
-2. Enforce rate limits: only `VISA_ATTEMPTS_PER_WINDOW` attempts per `VISA_ATTEMPT_WINDOW_MS`.
-3. Every `VISA_ATTEMPT_INTERVAL_MS`, run one `fastBookingAttempt()`.
-4. If `fastBookingAttempt()` returns `SUCCESS`, emit `COMPLETED` and stop.
+1. Ensure the browser is on the booking page. If not, the worker navigates there without counting that as a booking attempt.
+2. Enforce rate limits using `VISA_ATTEMPT_INTERVAL_MS`, `VISA_ATTEMPT_WINDOW_MS`, and `VISA_ATTEMPTS_PER_WINDOW`.
+3. Run one booking attempt cycle.
+4. Stop only after a real success is confirmed and `COMPLETED` is emitted.
 
-Important: the worker does **not** auto-refresh. It stabilizes by waiting for overlays/spinners and dismissing overlays.
+Important: the worker does not blindly refresh the page. It stabilizes by waiting for overlays and scanning the live calendar state.
 
 ### Recovery behaviors (built-in)
 
-- White/blank page guard: if navigation leads to `about:blank` / `chrome-error://` / near-empty DOM, the worker navigates back to the appointment page and retries.
-- Closed/crashed Chrome window: the worker recreates the driver and restarts login.
-- Long waits (rate limit): the worker uses a keep-alive sleep loop to periodically check session state and dismiss overlays.
+- White/blank page guard: if navigation leads to `about:blank`, `chrome-error://`, or a near-empty DOM, the worker navigates back to the appointment page and retries.
+- Closed or crashed Chrome window: the worker recreates the browser and restarts login.
+- Long waits: the worker uses a keep-alive sleep loop to periodically check session state and dismiss overlays.
 
-## fastBookingAttempt() (the booking attempt algorithm)
+## Booking attempt flow
 
-### A) Applicant checkbox (PENDING mode only)
+### 1) Applicant checkbox
 
-- If `VISA_RESCHEDULE=false`, the worker checks the **Applicant List** checkbox as early as possible.
-- Checkbox logic targets `input[id^='styled-checkbox-']` and has fallbacks if the input is visually hidden.
+- In pending mode, the worker checks the Applicant List checkbox early.
+- The checkbox helper targets the `styled-checkbox-*` family and falls back to nearby label or ancestor clicks when the input is hidden.
 
-### B) Pickup selection (select once)
+### 2) Pickup selection
 
-- Pickup is selected only if it is not already set to `VISA_PICKUP_POINT`.
-- Once the worker is past the calendar stage (a date is selected or “Available Slot(s)” is visible), pickup is **not** reselected.
+- In pending mode, the worker selects the configured pickup point if needed.
+- Once the worker has moved into the date/slot stage, it avoids reselecting pickup unless a refresh cycle explicitly calls for it.
 
-### C) Green date scanning (within date range)
+### 3) Green date scanning
 
-Worker scans the visible Angular Material calendar.
+The worker scans the visible Angular Material calendar month-by-month.
 
-Rules:
+- A date is considered available only when it is visually green.
+- Only dates inside the configured allowed range are accepted.
+- If the visible month has no usable green date, the worker can refresh the pickup and rescan before moving on.
 
-- A date is “available” only if it is visually green (the availability green color).
-- A green date is clickable only if it is within `VISA_MIN_DATE..VISA_MAX_DATE` (or fallback range).
-- Clicking is done in the browser context and then confirmed (selected classes / `aria-pressed`).
+### 4) Time slot selection
 
-If multiple in-range green dates exist, the worker tries them one-by-one until “Available Slot(s)” appears.
+- The worker selects the first enabled time-like slot it can find.
+- If slots appear only after the calendar settles, it waits briefly and retries instead of immediately failing.
 
-### D) Time slot selection
+### 5) Final action
 
-- The worker selects the first enabled time-slot button/link that looks like a time (example: `3:30 PM`).
-- If a second list appears after clicking proceed, it selects again.
+- Pending mode clicks `SELECT POST AND PROCEED`.
+- Reschedule mode clicks `BOOK POST APPOINTMENT`.
+- The final action is capped at two attempts with a gap between clicks so the page has time to settle.
 
-### E) Proceed
+### 6) Final confirmation
 
-- The worker clicks either:
-  - **SELECT POST AND PROCEED**, or
-  - **BOOK POST APPOINTMENT**
+The worker only reports success after a real outcome is observed.
 
-It waits for loading overlays and handles new windows if one opens.
-The final action is intentionally limited to at most two clicks, with a minimum 2-second gap between attempts, so the site is not hammered while it is still settling.
+- Preferred success signals: redirect to the dashboard, redirect to the my-appointment page, or a success message that clearly indicates booking completion.
+- If a confirmation dialog is still blocking the flow, the worker clicks only booking-related confirmation actions.
+- In reschedule mode, confirmed booking returns the browser to the dashboard before the worker pauses.
 
-### F) Final confirmation (only then SUCCESS)
-
-The worker does **not** claim success just because it progressed.
-
-Finalization is `finalizeBookingAndConfirm()`:
-
-1. Detect success signals (preferred):
-   - landed on `/dashboard`, or
-   - landed on `/home/appointment/myappointment`, or
-   - a success dialog/snackbar/alert contains “appointment booked/confirmed”.
-2. If not confirmed yet, click a final **Confirm/Book/Submit** action:
-   - dialog buttons first (Angular Material dialogs)
-   - then page-level Confirm/Book/Submit buttons
-3. Safety rules:
-   - it avoids “YES/OK” unless the dialog looks booking-related
-   - it will not confirm cancellation dialogs
-
-- in RESCHEDULE mode, once booking is confirmed, it returns the browser to the dashboard and pauses there for manual review
-
-Only after success is detected does `fastBookingAttempt()` return `SUCCESS`.
+Only after success is detected does the booking cycle return `SUCCESS`.
 
 ## How admin notification happens
 
-- Worker sends statuses via IPC: `reportStatus(state, message)`.
+- Worker sends statuses via IPC.
 - Backend receives them in `WorkerPool`.
 
 Key states:
 
-- `DATE_SELECTED` — backend extracts the `YYYY-MM-DD` for the email.
-- `SLOT_SELECTED` — backend extracts the time slot for the email.
-- `COMPLETED` — backend marks the session completed and queues admin email notification.
+- `DATE_SELECTED` - backend extracts the booked `YYYY-MM-DD` for the email.
+- `SLOT_SELECTED` - backend extracts the selected time slot for the email.
+- `COMPLETED` - backend marks the session completed and queues admin email notification.
 
-## Update cross-references (recent behavior changes)
+## Update cross-references
 
-These are the main algorithm updates that change runtime behavior:
+The current working flow is implemented in these helpers:
 
-- Stable pickup behavior (“select once”):
-  - `backend/main/visa-bot.js` → `triggerPickupCheck()` (no forced reselect)
-  - `backend/main/visa-bot.js` → `fastBookingAttempt()` avoids pickup changes once date/slots stage is reached
-
-- Green-date click reliability:
-  - `backend/main/visa-bot.js` → `findGreenAvailableDateWithinRange()` (browser-context scan + click + confirm)
-
-- Applicant checkbox timing:
-  - `backend/main/visa-bot.js` → `fastBookingAttempt()` checks applicant early in PENDING mode
-  - `backend/main/visa-bot.js` → `confirmApplicant()` targets `styled-checkbox-*` with fallbacks
-
-- Completion semantics tightened (emails are not premature):
-  - `backend/main/visa-bot.js` → `finalizeBookingAndConfirm()` must confirm success before returning `SUCCESS`
-  - `backend/main/visa-bot.js` → `appointmentWatcher()` emits `COMPLETED` only when `fastBookingAttempt()` returns `SUCCESS`
-  - `backend/src/queue/workerPool.js` → `COMPLETED` triggers admin email via `enqueueBookingSuccess()`
-
-- Final action pacing:
-  - `backend/main/visa-bot.js` → final `SELECT POST AND PROCEED` / `BOOK POST APPOINTMENT` clicks are capped at two attempts with a 2-second gap
-  - `backend/main/visa-bot.js` → RESCHEDULE success returns the browser to the dashboard before the worker pauses
+- `backend/main/index.js` - `openAppointmentMode()` decides pending versus reschedule entry.
+- `backend/main/index.js` - `waitForAppointmentBookingPageReady()` and `waitForCalendarUiReady()` gate calendar scans.
+- `backend/main/index.js` - `selectPickupPoint()` and `refreshPickupByToggle()` handle pickup selection and refresh.
+- `backend/main/index.js` - `huntGreenDate()` and `scanVisibleMonthForGreenDate()` handle month traversal and green-date discovery.
+- `backend/main/index.js` - `clickEarliestTimeSlot()` and `clickNextAvailableDateAfter()` handle slot selection and date stepping.
+- `backend/main/index.js` - `ensureApplicantChecked()` keeps the Applicant List state correct.
+- `backend/main/index.js` - `clickBookPostAppointmentButton()`, `safeClickProceed()`, and `waitForFinalActionOutcome()` control final submission and success detection.

@@ -1,6 +1,6 @@
-# desktop-app
+# LightningBot Desktop App
 
-An Electron application with React and TypeScript
+The Electron shell for LightningBot. It wraps the React frontend, starts the backend automatically, and packages the Playwright worker into the desktop build so operators do not need to run a separate backend in production.
 
 ## Recommended IDE Setup
 
@@ -22,12 +22,13 @@ $ pnpm dev
 
 ## Embedded backend
 
-This desktop app automatically starts the current backend from `../backend` as a child process when the Electron app launches.
+When the Electron app launches, it starts the backend from `../backend` as a child process.
 
 - Backend API base URL: `http://localhost:3001/api`
-- Runtime persistence (writable): Electron `userData` folder under `backend-runtime/` (stores `data/` and `profiles/`)
-- Production bundles: the backend and Playwright worker are packaged into the app, so clients do **not** need to run a separate backend instance
-- Packaged desktop sessions default to visible browser mode so the Chrome window opens when a session starts.
+- Runtime persistence: Electron `userData` folder under `backend-runtime/` for session data and Chrome profiles
+- Production bundles: the backend and worker are packaged into the app, so clients do **not** need a separate backend instance
+- Packaged desktop sessions default to visible browser mode so the Chrome window opens when a session starts
+- The booking algorithm that actually runs lives in `backend/main/index.js`
 
 ### Build
 

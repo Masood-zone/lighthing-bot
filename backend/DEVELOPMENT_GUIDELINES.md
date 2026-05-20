@@ -8,7 +8,7 @@ At scale, the system has four distinct planes:
     Where humans configure, start, pause, and observe.
 
 2. **Execution Engine (Automation Plane)**  
-    Where Selenium instances live, breathe, and occasionally misbehave.
+    Where Playwright worker processes live, breathe, and occasionally misbehave.
 
 3. **State & Queue Manager (Coordination Plane)**  
     Where multiple accounts, retries, and priorities are orchestrated.
@@ -49,14 +49,14 @@ Optional:
 **Backend responsibilities:**
 - Validate URL pattern (basic sanity, not trust)
 - Create a session record
-- Spawn a Selenium worker with those parameters
+- Spawn a Playwright worker with those parameters
 
-**Selenium worker flow:**
+**Worker flow:**
 - Open Chrome
 - Navigate to provided URL
-- Execute the standardized login flow
-- Wait for CAPTCHA (human step)
-- Continue autonomously
+- Execute the standardized login flow in `backend/main/index.js`
+- Wait for CAPTCHA as a human step
+- Continue autonomously after the dashboard is detected
 
 **Important constraint:**  
 The automation does not “discover” flows. It applies a known workflow to a user-supplied entry point.  
@@ -66,7 +66,7 @@ This prevents complexity explosion.
 
 ## 3) Interface concept #2: Bulk / queue-based login
 
-This is where the system becomes commercially interesting.
+This is where the system becomes operationally interesting.
 
 ### UI (React)
 A table-based interface:
@@ -91,8 +91,8 @@ Implementation can be plain React + `fetch`. No heroics.
 
 ### Recommended stack
 - **Node.js backend**
-- **Job queue:** BullMQ (or simple in-memory queue initially)
-- **Worker pool:** 1 Selenium instance = 1 worker
+- **Job queue:** BullMQ or a simple in-memory queue initially
+- **Worker pool:** 1 Playwright browser = 1 worker
 - **Persistent store:** SQLite is fine to start
 
 ### Conceptual model
@@ -131,7 +131,7 @@ Why:
 - human oversight
 
 Technical detail:
-- Each worker runs Selenium with its own Chrome **profile directory**
+- Each worker runs Playwright with its own Chrome **profile directory**
 - This preserves cookies and session state
 
 ---
@@ -148,7 +148,7 @@ Worker:
 - reopens browser
 - navigates to last known URL
 - runs session health check
-- resumes state machine
+- resumes the state machine
 
 State machines enable this; linear scripts do not.
 
@@ -185,9 +185,9 @@ Avoid over-engineering.
 - **Phase 2:** earliest date within preferred range  
 - **Phase 3:** priority tiers (VIP clients, earlier scanning intervals)
 
-This logic belongs in the **backend**, not Selenium.
+This logic belongs in the **backend**, not the browser worker.
 
-Selenium asks: “Is this date acceptable?”  
+The worker asks: “Is this date acceptable?”  
 Backend answers: **yes/no**.
 
 ---
