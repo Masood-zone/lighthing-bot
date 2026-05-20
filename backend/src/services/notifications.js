@@ -163,6 +163,18 @@ class EmailNotificationService {
     return ok;
   }
 
+  enqueueBookingClick({ sessionId, session, booking } = {}) {
+    const ok = this._enqueue({
+      type: "BOOKING_CLICKED",
+      sessionId: String(sessionId || ""),
+      session: session || null,
+      booking: booking || null,
+      ts: nowIso(),
+    });
+
+    return ok;
+  }
+
   _tick() {
     while (this.inFlight < this.maxConcurrent && this.queue.length > 0) {
       const job = this.queue.shift();
@@ -191,6 +203,78 @@ class EmailNotificationService {
 
     if (job.type === "BOOKING_SUCCESS") {
       await this._sendBookingSuccess(job);
+    } else if (job.type === "BOOKING_CLICKED") {
+      await this._sendBookingClicked(job);
+    }
+  }
+
+  async _sendBookingClicked(job) {
+    const transport = this._getTransport();
+    if (!transport) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[notifications] SMTP not configured (or nodemailer missing); skipping click email.",
+      );
+      return;
+    }
+
+    const recipients = this._getActiveRecipientEmails();
+    if (recipients.length === 0) {
+      return;
+    }
+
+    const cfg = getSmtpTransportConfigFromEnv();
+
+    const session = job.session || null;
+    const displayName = safeOneLine(session?.config?.displayName);
+    const applicantEmail = safeOneLine(session?.config?.email);
+    const pickupPoint = safeOneLine(session?.config?.pickupPoint);
+    const reschedule = Boolean(session?.config?.reschedule);
+
+    const attemptedDate = safeOneLine(
+      job?.booking?.dateKey || job?.booking?.date,
+    );
+    const timeSlot = safeOneLine(job?.booking?.timeSlot);
+
+    const subjectBase =
+      displayName || applicantEmail || job.sessionId || "Session";
+    const subject = `BOOK CLICKED: ${subjectBase}`;
+
+    const lines = [
+      "A booking click was initiated by a worker (confirmation pending).",
+      "",
+      `Session ID: ${safeOneLine(job.sessionId) || "(unknown)"}`,
+      `Applicant: ${displayName || "(unknown)"}${applicantEmail ? ` <${applicantEmail}>` : ""}`,
+      `Pickup point: ${pickupPoint || "(unknown)"}`,
+      `Mode: ${reschedule ? "RESCHEDULE" : "PENDING"}`,
+      `Attempted date: ${attemptedDate || "(unknown)"}`,
+      `Time slot: ${timeSlot || "(unknown)"}`,
+      `Timestamp: ${safeOneLine(job.ts)}`,
+      "",
+      "This is an automated notification from lighthing-bot.",
+    ];
+
+    const from = cfg.from;
+
+    const mail = {
+      from,
+      to: from,
+      bcc: recipients,
+      subject,
+      text: lines.join("\n"),
+    };
+
+    await transport.sendMail(mail);
+
+    if (
+      this.sessionStore &&
+      typeof this.sessionStore.appendLog === "function"
+    ) {
+      this.sessionStore.appendLog(
+        job.sessionId,
+        "info",
+        `Click notification sent to ${recipients.length} administrator(s)`,
+      );
     }
   }
 

@@ -2675,24 +2675,54 @@ async function clickExactActionButton(
         "FINAL_ACTION",
         `Unable to arm the full click burst for ${targetText}; attempt ${attempt + 1} of ${clickLimit}`,
       );
-      if (attempt + 1 < clickLimit && minimumGapMs > 0) {
+      if (attempt + 1 < clickLimit && attemptGapMs > 0) {
         // eslint-disable-next-line no-await-in-loop
-        await page.waitForTimeout(minimumGapMs).catch(() => {});
+        await page.waitForTimeout(attemptGapMs).catch(() => {});
       }
       continue;
     }
 
     lastClickedText = targetText;
+    const clickedMsg = clickState.found
+      ? attempt === 0
+        ? `Clicked ${targetText}; awaiting confirmation`
+        : `Re-clicked ${targetText}; awaiting confirmation`
+      : `Armed a full click burst for ${targetText}; awaiting confirmation`;
+
+    status("FINAL_ACTION_CLICKED", clickedMsg);
+
+    // After initiating the click burst, wait briefly for a redirect or a
+    // stable success/applicant toast. Only treat the action as successful
+    // when a real confirmation (redirect or success toast) is observed.
+    const outcome = await waitForFinalActionOutcome(
+      page,
+      page.url(),
+      CONFIG.HOT_FINAL_OUTCOME_TIMEOUT_MS,
+      CONFIG.HOT_FINAL_OUTCOME_POLL_MS,
+      CONFIG.HOT_BURST_OUTCOME_TIMEOUT_MS,
+    ).catch(() => null);
+
+    if (outcome === "booking") {
+      status(
+        "FINAL_ACTION_CONFIRMED",
+        `Detected booking after clicking ${targetText}`,
+      );
+      return lastClickedText || targetText;
+    }
+
     status(
-      "FINAL_ACTION_CLICKED",
-      clickState.found
-        ? attempt === 0
-          ? `Clicked ${targetText}; accepting submission immediately`
-          : `Re-clicked ${targetText}; accepting submission immediately`
-        : `Armed a full click burst for ${targetText}; accepting submission immediately`,
+      "FINAL_ACTION_WAIT",
+      `No booking confirmation after click for ${targetText}; outcome=${String(
+        outcome,
+      )}`,
     );
 
-    return lastClickedText || targetText;
+    // If not confirmed, allow another attempt (if any) after configured gap.
+    if (attempt + 1 < clickLimit && attemptGapMs > 0) {
+      // eslint-disable-next-line no-await-in-loop
+      await page.waitForTimeout(attemptGapMs).catch(() => {});
+    }
+    continue;
   }
 
   status(

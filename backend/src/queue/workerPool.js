@@ -448,6 +448,9 @@ class WorkerPool {
     /** @type {Set<string>} */
     this.notifiedSuccess = new Set();
 
+    /** @type {Set<string>} */
+    this.notifiedClick = new Set();
+
     /** @type {Map<string, {proxyIndex: number|null, proxySource: string, proxyUrl: string}>} */
     this.proxyAssignments = new Map();
 
@@ -970,6 +973,47 @@ class WorkerPool {
               );
             }
           }
+        } else if (state === "FINAL_ACTION_CLICKED") {
+          // Keep session as RUNNING but optionally emit a lightweight click
+          // notification to administrators (confirmation pending).
+          this.store.setStatus(
+            sessionId,
+            "RUNNING",
+            message || String(state || "RUNNING"),
+          );
+
+          if (!this.notifiedClick.has(sessionId)) {
+            this.notifiedClick.add(sessionId);
+            const svc = this.notificationService;
+            if (svc && typeof svc.enqueueBookingClick === "function") {
+              const ctx = this.bookingContext.get(sessionId) || {};
+              const queued = svc.enqueueBookingClick({
+                sessionId,
+                session,
+                booking: { ...ctx },
+              });
+
+              if (queued) {
+                this.store.appendLog(
+                  sessionId,
+                  "info",
+                  "Queued click notification to administrators",
+                );
+              } else {
+                this.store.appendLog(
+                  sessionId,
+                  "warn",
+                  "Failed to queue click notification (queue full)",
+                );
+              }
+            } else {
+              this.store.appendLog(
+                sessionId,
+                "warn",
+                "Email notifications not configured on server (click)",
+              );
+            }
+          }
         } else {
           this.store.setStatus(
             sessionId,
@@ -994,6 +1038,7 @@ class WorkerPool {
       this._releaseProxyAssignment(sessionId);
       this.bookingContext.delete(sessionId);
       this.notifiedSuccess.delete(sessionId);
+      this.notifiedClick.delete(sessionId);
       this.store.setRuntime(sessionId, { exitCode: code, signal });
       this.store.setQueueTimes(sessionId, { finishedAt: nowIso() });
 
