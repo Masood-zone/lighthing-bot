@@ -437,6 +437,9 @@ class WorkerPool {
       process.env.VISA_PROXY_URL || process.env.VISA_PROXY_SERVER || "",
     );
 
+    this.notificationsEnabled =
+      readBoolEnv("VISA_ENABLE_BOOKING_NOTIFICATIONS") === true;
+
     /** @type {Set<string>} */
     this.failedProxyUrls = new Set();
 
@@ -939,8 +942,12 @@ class WorkerPool {
         } else if (state === "COMPLETED") {
           this.store.setStatus(sessionId, "COMPLETED", message || "Completed");
 
-          // Non-blocking notification: enqueue email for admins ASAP.
-          if (!this.notifiedSuccess.has(sessionId)) {
+          // Notifications are paused for now; keep the completion state but do
+          // not send success emails until the feature is re-enabled.
+          if (
+            this.notificationsEnabled &&
+            !this.notifiedSuccess.has(sessionId)
+          ) {
             this.notifiedSuccess.add(sessionId);
 
             const svc = this.notificationService;
@@ -982,7 +989,7 @@ class WorkerPool {
             message || String(state || "RUNNING"),
           );
 
-          if (!this.notifiedClick.has(sessionId)) {
+          if (this.notificationsEnabled && !this.notifiedClick.has(sessionId)) {
             this.notifiedClick.add(sessionId);
             const svc = this.notificationService;
             if (svc && typeof svc.enqueueBookingClick === "function") {
