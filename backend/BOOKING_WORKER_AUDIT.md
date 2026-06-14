@@ -8,6 +8,23 @@ The worker has one shared booking loop. The only major branch is the mode gate i
 
 After the booking UI is ready, both modes share the same calendar scan, slot hunt, applicant validation, pickup refresh, and final-action recovery logic in the main booking attempt flow.
 
+## API Engine Addition
+
+The repository now also contains an opt-in API execution path:
+
+| Area | Implementation |
+| ---- | -------------- |
+| Feature flag | `VISA_EXECUTION_MODE=api`; default remains `dom` |
+| Worker entry | `backend/src/workerEntry.js` chooses `backend/main/api-worker.js` for API mode |
+| API worker | `backend/main/api-worker.js` launches Playwright for login/CAPTCHA, captures session state, then books through API calls |
+| API helpers | `backend/src/services/visaApi/*` contains the client, session extractor, applicant resolver, date selector, slot selector, payload builder, verifier, errors, and redaction helpers |
+| Final pending request | `POST /visaappointmentapi/appointments/schedule/group` with one appointment object |
+| Final reschedule request | `PUT /visaappointmentapi/appointments/schedule/group` with an array body |
+| Completion rule | A fresh `appointments/search` response must match selected appointment id, applicant id, application id, date, time, slot id, and `SCHEDULED` |
+| Locking | `WorkerPool` rejects another queued/running session for the same visa login host and booking email |
+
+API mode does not scan green calendar colors, click time slots, manipulate the applicant checkbox, or click final booking buttons. DOM mode remains available for fallback before any API final submission is attempted.
+
 ## Mode Comparison
 
 | Stage                 | PENDING                                                                     | RESCHEDULE                                                              | Implementation detail                                         |

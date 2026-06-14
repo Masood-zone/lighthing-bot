@@ -50,6 +50,7 @@ The backend runs as a single Express server (default port `3001`). It exposes a 
 |----------|-------------|---------|
 | `PORT` | Server port | `3001` |
 | `MAX_CONCURRENT` | Maximum parallel booking workers | `3` |
+| `VISA_EXECUTION_MODE` | Booking execution mode: `dom` for the existing Playwright DOM flow, `api` for authenticated API booking | `dom` |
 | `ADMIN_EMAIL` | Bootstrap admin email | — |
 | `ADMIN_PASSWORD` | Bootstrap admin password | — |
 | `VISA_SECRET_KEY` | Encryption key for stored passwords | — |
@@ -160,6 +161,13 @@ When an admin starts a booking hunt:
 
 ### Booking Automation Logic
 
+The worker supports two execution modes:
+
+- `VISA_EXECUTION_MODE=dom` keeps the current Playwright DOM workflow. This remains the default rollout mode.
+- `VISA_EXECUTION_MODE=api` uses Playwright for browser launch, manual login/CAPTCHA, authenticated session capture, and reauthentication. Appointment discovery, date/slot retrieval, submission, and verification then run through backend-only authenticated API calls.
+
+Visa-platform bearer tokens, refresh tokens, CSRF values, cookies, CAPTCHA tokens, and session-storage values are never returned to the React frontend or SSE payloads.
+
 The worker performs the following steps:
 
 1. **Launch browser** — Opens a headless (or visible) Chrome instance, optionally with a proxy
@@ -179,6 +187,38 @@ The worker performs the following steps:
 - **Calendar traversal** — Scans multiple months looking for available dates
 - **Reschedule mode** — Can reschedule existing appointments instead of creating new ones
 - **Persistent Chrome profiles** — Maintains login state between sessions
+
+### API Booking Engine
+
+In API mode the worker:
+
+1. Opens the visa login page in Playwright and waits for manual CAPTCHA/login.
+2. Captures the backend-only browser session, including `sessionStorage.authToken`, cookies, user-agent, CSRF/refresh headers, and dynamic correlation headers when observed.
+3. Calls `GET /visauserapi/portal/getuser`.
+4. Resolves application and appointment context from authenticated bootstrap data and `POST /visaappointmentapi/appointments/search`.
+5. Calls `POST /visaadministrationapi/v1/modifyslot/getFirstAvailableMonth`.
+6. Calls `POST /visaadministrationapi/v1/modifyslot/getSlotDates`.
+7. Filters dates using the configured absolute, days-from-now, or weeks-from-now window.
+8. Calls `POST /visaadministrationapi/v1/modifyslot/getSlotTime` for candidate dates and selects the earliest `UNBOOKED` + active slot.
+9. Submits pending appointments with `POST /visaappointmentapi/appointments/schedule/group` using a single object body.
+10. Submits reschedules with `PUT /visaappointmentapi/appointments/schedule/group` using an array body.
+11. Verifies completion through a fresh `appointments/search` result before emitting `COMPLETED`.
+
+Final submission requests are not automatically retried after an ambiguous timeout or disconnect. The worker verifies the appointment first, then refreshes availability if the selected booking did not apply.
+
+### Account-Level Locking
+
+Only one queued or running worker may exist for a specific visa booking account at a time. The lock key is based on the visa login host and the booking email. Starting a second session for the same account returns `409 account_session_locked` with the existing session id. Locks are released when the session is stopped, fails to start, completes, errors, or the worker exits.
+
+### Returning to DOM Mode
+
+Set:
+
+```bash
+VISA_EXECUTION_MODE=dom
+```
+
+to use the original Playwright DOM workflow. `api` mode is opt-in while endpoint behavior is being verified.
 
 ### Proxy System
 

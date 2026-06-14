@@ -7,8 +7,16 @@ function createSessionsRouter({ store, pool }) {
     const session = store.getSession(req.params.id);
     if (!session) return res.status(404).json({ error: "not_found" });
 
-    pool.enqueue(session.id);
-    return res.json({ ok: true, queued: true, id: session.id });
+    const result = pool.enqueue(session.id);
+    if (result?.duplicateAccount) {
+      return res.status(409).json({
+        ok: false,
+        error: "account_session_locked",
+        existingSessionId: result.existingSessionId,
+      });
+    }
+
+    return res.json({ ok: true, queued: Boolean(result?.queued), id: session.id });
   });
 
   router.post("/:id/stop", (req, res) => {

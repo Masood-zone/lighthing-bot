@@ -4,12 +4,12 @@
   "description": "",
   "main": "src/server.js",
   "scripts": {
-    "build": "node --check src/server.js && node --check src/workerEntry.js && node --check main/index.js",
+    "build": "node --check src/server.js && node --check src/workerEntry.js && node --check main/index.js && node --check main/api-worker.js",
     "render-build": "corepack enable && pnpm install --frozen-lockfile && pnpm run build",
     "start": "node src/server.js",
     "dev": "node src/server.js",
     "start:worker": "node main/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test tests/*.test.js"
   },
   "keywords": [],
   "author": "",

@@ -385,6 +385,18 @@ function getSessionUserLabel(session) {
   return displayName || email || "unknown user";
 }
 
+function getSessionAccountKey(session) {
+  const email = safeOneLine(session?.config?.email).toLowerCase();
+  let host = "";
+  try {
+    host = new URL(session?.config?.loginUrl || "").host.toLowerCase();
+  } catch {
+    host = "";
+  }
+
+  return `${host || "unknown-host"}:${email || session?.id || "unknown-account"}`;
+}
+
 function logSessionLifecycle(sessionId, session, action, detail = "") {
   const prefix = `[${nowIso()}] [session:${sessionId}]`;
   const userLabel = getSessionUserLabel(session);
@@ -457,6 +469,9 @@ class WorkerPool {
     /** @type {Map<string, {proxyIndex: number|null, proxySource: string, proxyUrl: string}>} */
     this.proxyAssignments = new Map();
 
+    /** @type {Map<string, string>} accountKey -> sessionId */
+    this.accountLocks = new Map();
+
     /** @type {string[]} */
     this.queue = [];
     /** @type {Map<string, import('node:child_process').ChildProcess>} */
@@ -481,7 +496,7 @@ class WorkerPool {
 
   enqueue(sessionId) {
     const session = this.store.getSession(sessionId);
-    if (!session) return;
+    if (!session) return { queued: false, reason: "not_found" };
 
     if (this.maxConcurrent === 0) {
       this.store.setStatus(
@@ -501,18 +516,60 @@ class WorkerPool {
         "Blocked session start",
         "Workers are disabled (MAX_CONCURRENT=0)",
       );
-      return;
+      return { queued: false, reason: "workers_disabled" };
     }
-    if (this.queue.includes(sessionId) || this.active.has(sessionId)) return;
+
+    if (this.queue.includes(sessionId) || this.active.has(sessionId)) {
+      return { queued: false, alreadyQueued: true, existingSessionId: sessionId };
+    }
+
+    const accountKey = getSessionAccountKey(session);
+    const lockedBy = this.accountLocks.get(accountKey);
+    if (lockedBy && lockedBy !== sessionId) {
+      this.store.appendLog(
+        sessionId,
+        "warn",
+        `Start rejected: account is already locked by active/queued session ${lockedBy}`,
+      );
+      logSessionLifecycle(
+        sessionId,
+        session,
+        "Rejected duplicate account session",
+        `locked by ${lockedBy}`,
+      );
+      return {
+        queued: false,
+        duplicateAccount: true,
+        existingSessionId: lockedBy,
+      };
+    }
+
+    this.accountLocks.set(accountKey, sessionId);
     this.queue.push(sessionId);
     this.store.setStatus(sessionId, "QUEUED", "Queued for execution");
     this.store.setQueueTimes(sessionId, { enqueuedAt: nowIso() });
     logSessionLifecycle(sessionId, session, "Queued session start");
     this._tick();
+    return { queued: true, id: sessionId };
   }
 
   dequeue(sessionId) {
     this.queue = this.queue.filter((id) => id !== sessionId);
+  }
+
+  _releaseAccountLock(sessionId) {
+    const session = this.store.getSession(sessionId);
+    const accountKey = getSessionAccountKey(session || { id: sessionId });
+    if (this.accountLocks.get(accountKey) === sessionId) {
+      this.accountLocks.delete(accountKey);
+      return;
+    }
+
+    for (const [key, lockedSessionId] of this.accountLocks.entries()) {
+      if (lockedSessionId === sessionId) {
+        this.accountLocks.delete(key);
+      }
+    }
   }
 
   stop(sessionId) {
@@ -533,6 +590,7 @@ class WorkerPool {
       return true;
     }
 
+    this._releaseAccountLock(sessionId);
     this.store.setStatus(sessionId, "STOPPED", "Stopped");
     this.store.setQueueTimes(sessionId, { finishedAt: nowIso() });
     logSessionLifecycle(sessionId, session, "Stopped session");
@@ -578,6 +636,7 @@ class WorkerPool {
           "error",
           `Worker start failed: ${String(err?.message || err)}`,
         );
+        this._releaseAccountLock(nextId);
       })
       .finally(() => {
         this.starting.delete(nextId);
@@ -587,8 +646,12 @@ class WorkerPool {
 
   async _startSession(sessionId) {
     const session = this.store.getSession(sessionId);
-    if (!session) return;
+    if (!session) {
+      this._releaseAccountLock(sessionId);
+      return;
+    }
     if (session.status === "STOPPED" || session.status === "BLOCKED") {
+      this._releaseAccountLock(sessionId);
       return;
     }
 
@@ -634,6 +697,7 @@ class WorkerPool {
       );
       this.store.setStatus(sessionId, "ERROR", "Credential preparation failed");
       this.store.setQueueTimes(sessionId, { finishedAt: nowIso() });
+      this._releaseAccountLock(sessionId);
       return;
     }
 
@@ -654,6 +718,8 @@ class WorkerPool {
           : "0",
       VISA_PROFILE_DIR: profileDir,
       VISA_RESCHEDULE: session.config.reschedule ? "1" : "0",
+      VISA_EXECUTION_MODE:
+        process.env.VISA_EXECUTION_MODE || process.env.VISA_WORKER_MODE || "dom",
 
       // Optional appointment date preferences (all optional)
       VISA_DATE_START: session.config.dateStart || "",
@@ -690,6 +756,7 @@ class WorkerPool {
 
     const currentSession = this.store.getSession(sessionId);
     if (!currentSession || currentSession.status === "STOPPED") {
+      this._releaseAccountLock(sessionId);
       return;
     }
 
@@ -868,6 +935,7 @@ class WorkerPool {
 
     const launchSession = this.store.getSession(sessionId);
     if (!launchSession || launchSession.status === "STOPPED") {
+      this._releaseAccountLock(sessionId);
       return;
     }
 
@@ -1043,6 +1111,7 @@ class WorkerPool {
     child.on("exit", (code, signal) => {
       this.active.delete(sessionId);
       this._releaseProxyAssignment(sessionId);
+      this._releaseAccountLock(sessionId);
       this.bookingContext.delete(sessionId);
       this.notifiedSuccess.delete(sessionId);
       this.notifiedClick.delete(sessionId);
