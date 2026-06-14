@@ -50,7 +50,7 @@ The backend runs as a single Express server (default port `3001`). It exposes a 
 |----------|-------------|---------|
 | `PORT` | Server port | `3001` |
 | `MAX_CONCURRENT` | Maximum parallel booking workers | `3` |
-| `VISA_EXECUTION_MODE` | Booking execution mode: `dom` for the existing Playwright DOM flow, `api` for authenticated API booking | `dom` |
+| `VISA_EXECUTION_MODE` | Booking execution mode: `api` for authenticated API booking, `dom` for the legacy Playwright DOM flow | `api` |
 | `ADMIN_EMAIL` | Bootstrap admin email | — |
 | `ADMIN_PASSWORD` | Bootstrap admin password | — |
 | `VISA_SECRET_KEY` | Encryption key for stored passwords | — |
@@ -163,8 +163,8 @@ When an admin starts a booking hunt:
 
 The worker supports two execution modes:
 
-- `VISA_EXECUTION_MODE=dom` keeps the current Playwright DOM workflow. This remains the default rollout mode.
-- `VISA_EXECUTION_MODE=api` uses Playwright for browser launch, manual login/CAPTCHA, authenticated session capture, and reauthentication. Appointment discovery, date/slot retrieval, submission, and verification then run through backend-only authenticated API calls.
+- `VISA_EXECUTION_MODE=api` uses Playwright for browser launch, manual login/CAPTCHA, authenticated session capture, and reauthentication. Appointment discovery, date/slot retrieval, submission, and verification then run through backend-only authenticated API calls. This is the default app mode.
+- `VISA_EXECUTION_MODE=dom` keeps the legacy Playwright DOM workflow available as an explicit fallback.
 
 Visa-platform bearer tokens, refresh tokens, CSRF values, cookies, CAPTCHA tokens, and session-storage values are never returned to the React frontend or SSE payloads.
 
@@ -218,7 +218,7 @@ Set:
 VISA_EXECUTION_MODE=dom
 ```
 
-to use the original Playwright DOM workflow. `api` mode is opt-in while endpoint behavior is being verified.
+to use the original Playwright DOM workflow. API mode is now the normal app path.
 
 ### Proxy System
 

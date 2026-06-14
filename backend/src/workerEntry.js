@@ -2,7 +2,7 @@
 // This isolates booking automation from the API server process.
 
 const executionMode = String(
-  process.env.VISA_EXECUTION_MODE || process.env.VISA_WORKER_MODE || "dom",
+  process.env.VISA_EXECUTION_MODE || process.env.VISA_WORKER_MODE || "api",
 )
   .trim()
   .toLowerCase();

@@ -10,11 +10,11 @@ After the booking UI is ready, both modes share the same calendar scan, slot hun
 
 ## API Engine Addition
 
-The repository now also contains an opt-in API execution path:
+The repository now uses the API execution path by default:
 
 | Area | Implementation |
 | ---- | -------------- |
-| Feature flag | `VISA_EXECUTION_MODE=api`; default remains `dom` |
+| Feature flag | `VISA_EXECUTION_MODE=api`; `dom` remains available as explicit fallback |
 | Worker entry | `backend/src/workerEntry.js` chooses `backend/main/api-worker.js` for API mode |
 | API worker | `backend/main/api-worker.js` launches Playwright for login/CAPTCHA, captures session state, then books through API calls |
 | API helpers | `backend/src/services/visaApi/*` contains the client, session extractor, applicant resolver, date selector, slot selector, payload builder, verifier, errors, and redaction helpers |

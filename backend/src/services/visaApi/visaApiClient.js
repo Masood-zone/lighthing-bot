@@ -175,9 +175,23 @@ class VisaApiClient {
             retryAfterMs,
           });
           if (readOnly && attempt < attempts && isRetryableReadError(error)) {
-            await sleep(jitter(retryAfterMs || delays[attempt - 1]));
+            const nextDelayMs = jitter(retryAfterMs || delays[attempt - 1]);
+            this.logger("warn", {
+              operation: op,
+              event: "request_retry",
+              status,
+              attempt,
+              nextDelayMs,
+            });
+            await sleep(nextDelayMs);
             continue;
           }
+          this.logger("warn", {
+            operation: op,
+            event: "request_failed",
+            status,
+            attempt,
+          });
           throw error;
         }
 
@@ -192,12 +206,28 @@ class VisaApiClient {
         }
 
         if (error instanceof VisaApiRateLimitedError && readOnly && attempt < attempts) {
-          await sleep(jitter(error.retryAfterMs || delays[attempt - 1]));
+          const nextDelayMs = jitter(error.retryAfterMs || delays[attempt - 1]);
+          this.logger("warn", {
+            operation: op,
+            event: "request_retry",
+            status: error.status,
+            attempt,
+            nextDelayMs,
+          });
+          await sleep(nextDelayMs);
           continue;
         }
 
         if (error instanceof VisaPlatformUnavailableError && readOnly && attempt < attempts) {
-          await sleep(jitter(delays[attempt - 1]));
+          const nextDelayMs = jitter(delays[attempt - 1]);
+          this.logger("warn", {
+            operation: op,
+            event: "request_retry",
+            status: error.status,
+            attempt,
+            nextDelayMs,
+          });
+          await sleep(nextDelayMs);
           continue;
         }
 
@@ -205,14 +235,34 @@ class VisaApiClient {
         const transient =
           /timeout|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket|network/i.test(message);
         if (readOnly && transient && attempt < attempts) {
-          await sleep(jitter(delays[attempt - 1]));
+          const nextDelayMs = jitter(delays[attempt - 1]);
+          this.logger("warn", {
+            operation: op,
+            event: "request_retry",
+            attempt,
+            error: message,
+            nextDelayMs,
+          });
+          await sleep(nextDelayMs);
           continue;
         }
 
         if (transient) {
+          this.logger("warn", {
+            operation: op,
+            event: "request_failed",
+            attempt,
+            error: message,
+          });
           throw new VisaPlatformUnavailableError(message, { operation: op });
         }
 
+        this.logger("warn", {
+          operation: op,
+          event: "request_failed",
+          attempt,
+          error: message,
+        });
         throw error;
       }
     }

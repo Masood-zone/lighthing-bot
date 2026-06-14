@@ -12,6 +12,7 @@ const {
   VisaApiUnauthorizedError,
   VisaApiForbiddenError,
   VisaApiRateLimitedError,
+  VisaPlatformUnavailableError,
   VisaNoDatesAvailableError,
   VisaNoSlotsAvailableError,
   VisaBookingVerificationError,
@@ -114,6 +115,12 @@ function log(level, message) {
     level,
     message,
   });
+}
+
+function formatApiError(error) {
+  const operation = error?.operation ? `${error.operation}: ` : "";
+  const statusCode = error?.status ? `HTTP ${error.status} - ` : "";
+  return `${operation}${statusCode}${error?.message || String(error)}`;
 }
 
 function normalizeProxyUrl(raw) {
@@ -575,7 +582,9 @@ async function main() {
       auth,
       baseUrl: getBaseUrl(),
       logger: (level, payload) => {
-        if (level !== "debug") log(level, JSON.stringify(redact(payload)));
+        const event = payload?.event || "";
+        if (level === "debug" && event === "request_start") return;
+        log(level === "debug" ? "info" : level, JSON.stringify(redact(payload)));
       },
     });
 
@@ -607,8 +616,17 @@ async function main() {
 
         if (error instanceof VisaApiRateLimitedError) {
           const waitMs = error.retryAfterMs || CONFIG.ATTEMPT_INTERVAL_MS;
-          status("RATE_LIMITED", `Rate limited; waiting ${Math.ceil(waitMs / 1000)}s`);
+          status(
+            "RATE_LIMITED",
+            `${formatApiError(error)}; waiting ${Math.ceil(waitMs / 1000)}s`,
+          );
           await sleep(waitMs);
+          continue;
+        }
+
+        if (error instanceof VisaPlatformUnavailableError) {
+          status("PLATFORM_UNAVAILABLE", formatApiError(error));
+          await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
           continue;
         }
 
@@ -632,12 +650,12 @@ async function main() {
         }
 
         if (isTerminalContractError(error)) {
-          status("INVALID_API_CONTRACT", error.message);
+          status("INVALID_API_CONTRACT", formatApiError(error));
           terminalError = true;
           break;
         }
 
-        status("ERROR", error?.message || String(error));
+        status("ERROR", formatApiError(error));
         await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
       }
     }

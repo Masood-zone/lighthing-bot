@@ -719,7 +719,7 @@ class WorkerPool {
       VISA_PROFILE_DIR: profileDir,
       VISA_RESCHEDULE: session.config.reschedule ? "1" : "0",
       VISA_EXECUTION_MODE:
-        process.env.VISA_EXECUTION_MODE || process.env.VISA_WORKER_MODE || "dom",
+        process.env.VISA_EXECUTION_MODE || process.env.VISA_WORKER_MODE || "api",
 
       // Optional appointment date preferences (all optional)
       VISA_DATE_START: session.config.dateStart || "",

@@ -26,7 +26,7 @@ This file documents the runtime algorithm executed by the Playwright worker in `
 - `VISA_PROXY_URL` - single-proxy fallback in standard proxy URL format
 - `VISA_PROXY_POOL` / `VISA_PROXY_POOL_FILE` - legacy proxy fallbacks
 - `VISA_PROXY_BYPASS` - optional bypass list passed to Playwright
-- `VISA_EXECUTION_MODE` - `dom` uses the current Playwright DOM worker; `api` enables the authenticated API booking worker
+- `VISA_EXECUTION_MODE` - `api` uses the authenticated API booking worker; `dom` uses the legacy Playwright DOM worker
 
 The backend prefers Proxy11 for multi-session isolation. On worker start it requests `PROXY_HOST?key=PROXY_API_KEY`, reserves a proxy for the session, and passes the resulting `VISA_PROXY_URL` to Playwright before Chrome launches. If Proxy11 is unavailable, the worker falls back to the stored proxy, `VISA_PROXY_POOL`, `backend/data/proxy-pool.txt`, or the single `VISA_PROXY_URL`.
 
@@ -67,16 +67,16 @@ The worker also honors the tighter runtime values used by the current algorithm:
 
 ## Execution modes
 
-The default execution mode is still the Playwright DOM worker:
-
-```text
-VISA_EXECUTION_MODE=dom
-```
-
-API mode is enabled explicitly:
+The default execution mode is the authenticated API worker:
 
 ```text
 VISA_EXECUTION_MODE=api
+```
+
+The legacy Playwright DOM worker is available explicitly:
+
+```text
+VISA_EXECUTION_MODE=dom
 ```
 
 In API mode Playwright remains responsible for browser launch, manual login, manual CAPTCHA completion, authenticated session capture, and reauthentication. The worker then uses the authenticated browser context for API requests instead of calendar DOM inspection or final button clicks.
