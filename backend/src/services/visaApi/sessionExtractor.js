@@ -38,6 +38,20 @@ function createNetworkCapture() {
     responses: [],
   };
 
+  const shouldCaptureBody = (url) =>
+    /\/visaappointmentapi\/appointments\/search/i.test(url) ||
+    /\/visaworkflowprocessor\/workflow\/getTransformData\//i.test(url) ||
+    /\/visaworkflowprocessor\/workflow\/getUserHistoryApplicantPaymentStatus/i.test(url);
+
+  const parseJsonMaybe = (text) => {
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  };
+
   const rememberRequest = (request) => {
     try {
       const headers = request.headers();
@@ -70,11 +84,17 @@ function createNetworkCapture() {
       if (auth) state.authorizationHeader = normalizeBearer(auth);
       if (refresh) state.refreshToken = refresh;
       if (csrf) state.csrfToken = csrf;
-      state.responses.push({
+      const responseRecord = {
         url: response.url(),
         status: response.status(),
         capturedAt: nowIso(),
-      });
+      };
+      if (shouldCaptureBody(responseRecord.url)) {
+        const bodyText = await response.text().catch(() => "");
+        const body = parseJsonMaybe(bodyText);
+        if (body !== null) responseRecord.body = body;
+      }
+      state.responses.push(responseRecord);
       if (state.responses.length > 200) state.responses.shift();
     } catch {
       // Capture must not interfere with the browser.

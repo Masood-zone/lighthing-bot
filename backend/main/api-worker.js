@@ -25,6 +25,7 @@ const {
   normalizeAvailableDates,
   selectAvailableDate,
   monthRangeFor,
+  currentMonthRange,
   laterDate,
   earlierDate,
   formatAppointmentTime,
@@ -32,6 +33,7 @@ const {
   buildAppointmentPayload,
   fingerprintAttempt,
   findVerifiedAppointment,
+  appointmentMatchesSubmission,
   resolveApplicantContext,
   buildAvailabilityContext,
   collectValuesDeep,
@@ -81,6 +83,9 @@ const CONFIG = {
   ALLOW_SAME_DATE_RESCHEDULE:
     process.env.VISA_ALLOW_SAME_DATE_RESCHEDULE === "1" ||
     process.env.VISA_ALLOW_SAME_DATE_RESCHEDULE === "true",
+  SELECTED_POST_USER_ID: String(
+    process.env.VISA_SELECTED_POST_USER_ID || process.env.VISA_POST_USER_ID || "483",
+  ),
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -345,6 +350,14 @@ async function resolveContext({ client, networkState }) {
   const user = await client.getAuthenticatedUser();
   const bootstrapPieces = [user];
 
+  const postConfiguration = await client.getPostConfiguration(
+    CONFIG.SELECTED_POST_USER_ID,
+  );
+  status(
+    "POST_CONFIGURATION_READY",
+    `Loaded Accra post configuration for postUserId ${CONFIG.SELECTED_POST_USER_ID}`,
+  );
+
   const history = await client
     .getUserHistoryApplicantPaymentStatus()
     .catch((error) => {
@@ -369,12 +382,22 @@ async function resolveContext({ client, networkState }) {
 
   if (workflowData) bootstrapPieces.push(workflowData);
 
+  const selectedAppointment = {
+    ...resolved.appointment,
+    postUserId: CONFIG.SELECTED_POST_USER_ID,
+  };
+  const availability = buildAvailabilityContext(selectedAppointment, {
+    postUserIdOverride: CONFIG.SELECTED_POST_USER_ID,
+  });
+
   return {
     user,
     bootstrapData: bootstrapPieces,
     workflowData,
+    postConfiguration,
     ...resolved,
-    availability: buildAvailabilityContext(resolved.appointment),
+    appointment: selectedAppointment,
+    availability,
   };
 }
 
@@ -451,10 +474,11 @@ async function findDateAndSlot({ client, context }) {
     status("DATE_SELECTED", selectedDate);
     status("FETCHING_SLOTS", `Fetching slots for ${selectedDate}`);
 
+    const slotLookupRange = currentMonthRange();
     const slots = await client.getAvailableTimeSlots(context.availability, {
       slotDate: selectedDate,
-      fromDate: range.fromDate,
-      toDate: range.toDate,
+      fromDate: slotLookupRange.fromDate,
+      toDate: slotLookupRange.toDate,
     });
 
     const slotSelection = selectEarliestUsableSlot(slots);
@@ -508,6 +532,23 @@ async function submitAndVerify({ client, context, selectedDate, selectedSlot }) 
     );
   }
 
+  const finalRecords = Array.isArray(finalResponse)
+    ? finalResponse
+    : finalResponse
+      ? [finalResponse]
+      : [];
+  const finalVerified =
+    finalRecords.find((appointment) =>
+      appointmentMatchesSubmission(appointment, payload),
+    ) || null;
+  if (finalVerified) {
+    status(
+      "VERIFYING_BOOKING",
+      "Final booking response matched the selected appointment",
+    );
+    return { payload, appointment: finalVerified, finalResponse };
+  }
+
   status("VERIFYING_BOOKING", "Verifying appointment through appointment search");
   const appointments = await client.searchCurrentAppointments(payload.applicationId);
   const verified = findVerifiedAppointment(appointments, payload);
@@ -524,8 +565,7 @@ async function submitAndVerify({ client, context, selectedDate, selectedSlot }) 
   );
 }
 
-async function runApiHuntCycle({ client, networkState }) {
-  const context = await resolveContext({ client, networkState });
+async function runApiHuntCycle({ client, context }) {
   const { selectedDate, selectedSlot } = await findDateAndSlot({
     client,
     context,
@@ -559,6 +599,7 @@ async function main() {
   let client = null;
   let completionReported = false;
   let terminalError = false;
+  let resolvedContext = null;
 
   try {
     await login(page);
@@ -597,7 +638,17 @@ async function main() {
           throw new VisaApiUnauthorizedError("Token is near expiration");
         }
 
-        await runApiHuntCycle({ client, networkState: capture.state });
+        if (!resolvedContext) {
+          resolvedContext = await resolveContext({
+            client,
+            networkState: capture.state,
+          });
+        }
+
+        await runApiHuntCycle({
+          client,
+          context: resolvedContext,
+        });
         completionReported = true;
       } catch (error) {
         if (error instanceof VisaNoDatesAvailableError) {
@@ -640,6 +691,7 @@ async function main() {
             bookingUserId: CONFIG.SESSION_ID,
           });
           client.auth = auth;
+          resolvedContext = null;
           status("SESSION_READY", "API session refreshed after reauthentication");
           continue;
         }

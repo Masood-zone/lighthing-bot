@@ -310,6 +310,23 @@ class VisaApiClient {
     return response;
   }
 
+  async getPostConfiguration(postUserId) {
+    const response = await this.request(
+      "GET",
+      `/visaadministrationapi/v1/postconfiguration/get/${encodeURIComponent(
+        postUserId,
+      )}`,
+      { operation: "getPostConfiguration" },
+    );
+    if (!Array.isArray(response)) {
+      throw new VisaApiContractError("postconfiguration/get did not return an array", {
+        operation: "getPostConfiguration",
+        responseBody: safeJson(response),
+      });
+    }
+    return response;
+  }
+
   async getWorkflowData(applicationId) {
     return this.request(
       "GET",
@@ -403,7 +420,7 @@ class VisaApiClient {
       "PUT",
       "/visaappointmentapi/appointments/schedule/group",
       {
-        data: [payload],
+        data: payload,
         operation: "submitRescheduleAppointment",
         readOnly: false,
       },

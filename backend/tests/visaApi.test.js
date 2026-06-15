@@ -3,10 +3,12 @@ const assert = require("node:assert/strict");
 
 const {
   computeDateWindow,
+  currentMonthRange,
   selectAvailableDate,
   selectEarliestUsableSlot,
   formatAppointmentTime,
   buildAppointmentPayload,
+  buildAvailabilityContext,
   appointmentMatchesSubmission,
   redact,
   decodeJwtExp,
@@ -59,6 +61,13 @@ test("days-from-now preferences are frozen from a supplied clock", () => {
     minDate: "2026-06-16",
     maxDate: "2026-06-19",
     source: "days",
+  });
+});
+
+test("slot-time lookup range uses the current month window", () => {
+  assert.deepEqual(currentMonthRange(new Date("2026-06-14T12:00:00.000Z")), {
+    fromDate: "2026-06-14",
+    toDate: "2026-06-30",
   });
 });
 
@@ -117,6 +126,22 @@ test("booking payload is built from appointment and slot fields", () => {
     postUserId: "post-user-1",
     slotId: "slot-1",
   });
+});
+
+test("availability context can force the selected Accra post user id", () => {
+  const context = buildAvailabilityContext(
+    {
+      postUserId: "old-post",
+      applicantId: "applicant-1",
+      applicationId: "application-1",
+      appointmentLocationType: "POST",
+      visaClass: "F1",
+      visaType: "NIV",
+    },
+    { postUserIdOverride: "483" },
+  );
+
+  assert.equal(context.postUserId, "483");
 });
 
 test("verification requires scheduled status and selected slot fields", () => {

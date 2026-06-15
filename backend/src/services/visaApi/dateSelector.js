@@ -161,6 +161,20 @@ function monthRangeFor(dateOnly) {
   };
 }
 
+function currentMonthRange(now = new Date()) {
+  const today = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
+  const last = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0),
+  );
+
+  return {
+    fromDate: formatIsoDateOnly(today),
+    toDate: formatIsoDateOnly(last),
+  };
+}
+
 function laterDate(a, b) {
   if (!a) return b || null;
   if (!b) return a || null;
@@ -186,6 +200,7 @@ module.exports = {
   normalizeAvailableDates,
   selectAvailableDate,
   monthRangeFor,
+  currentMonthRange,
   laterDate,
   earlierDate,
   platformDateTime,

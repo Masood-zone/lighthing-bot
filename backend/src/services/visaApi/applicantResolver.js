@@ -41,7 +41,23 @@ function applicationIdsFromNetwork(networkState) {
     const body = parseRequestPostData(request.postData);
     if (body) ids.push(...collectValuesDeep(body, "applicationId"));
   }
+  for (const response of networkState?.responses || []) {
+    if (response?.body) {
+      ids.push(...collectValuesDeep(response.body, "applicationId"));
+    }
+  }
   return Array.from(new Set(ids.map(String).filter(Boolean)));
+}
+
+function appointmentResponsesFromNetwork(networkState) {
+  const appointments = [];
+  for (const response of networkState?.responses || []) {
+    const url = String(response?.url || "");
+    if (!/\/visaappointmentapi\/appointments\/search/i.test(url)) continue;
+    if (!Array.isArray(response.body)) continue;
+    appointments.push(...response.body);
+  }
+  return appointments;
 }
 
 function chooseAppointment(appointments, { mode, applicationId, applicantId }) {
@@ -98,6 +114,18 @@ async function resolveApplicantContext({
     new Set(knownApplicationIds.map(String).filter(Boolean)),
   );
 
+  const capturedAppointments = appointmentResponsesFromNetwork(networkState);
+  const capturedAppointment = chooseAppointment(capturedAppointments, { mode });
+  if (capturedAppointment) {
+    return {
+      applicationId: String(capturedAppointment.applicationId || ""),
+      applicantId: String(capturedAppointment.applicantId || ""),
+      appointment: capturedAppointment,
+      appointments: capturedAppointments,
+      source: "captured_appointments_search",
+    };
+  }
+
   let lastAppointments = [];
   for (const applicationId of uniqueApplicationIds) {
     // eslint-disable-next-line no-await-in-loop
@@ -132,9 +160,9 @@ async function resolveApplicantContext({
   throw new VisaApplicationNotFoundError("No appointment records found");
 }
 
-function buildAvailabilityContext(appointment) {
+function buildAvailabilityContext(appointment, { postUserIdOverride } = {}) {
   const context = {
-    postUserId: appointment?.postUserId,
+    postUserId: postUserIdOverride || appointment?.postUserId,
     applicantId: appointment?.applicantId,
     applicationId: appointment?.applicationId,
     locationType: appointment?.appointmentLocationType || "POST",
