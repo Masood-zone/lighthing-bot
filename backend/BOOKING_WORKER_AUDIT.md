@@ -21,7 +21,7 @@ The repository now uses the API execution path by default:
 | Accra post config | API mode calls `GET /visaadministrationapi/v1/postconfiguration/get/483` and uses post user id `483` as the selected Accra post |
 | Final pending request | `POST /visaappointmentapi/appointments/schedule/group` with one appointment object |
 | Final reschedule request | `PUT /visaappointmentapi/appointments/schedule/group` with one appointment object |
-| Completion rule | The final response, or a follow-up `appointments/search` when needed, must match selected appointment id, applicant id, application id, date, time, slot id, and `SCHEDULED` |
+| Completion rule | The final booking response must match selected appointment id, applicant id, application id, date, time, slot id, and `SCHEDULED` |
 | Locking | `WorkerPool` rejects another queued/running session for the same visa login host and booking email |
 
 API mode does not scan green calendar colors, click time slots, manipulate the applicant checkbox, or click final booking buttons. DOM mode remains available for fallback before any API final submission is attempted.

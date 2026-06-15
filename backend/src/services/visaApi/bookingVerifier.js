@@ -18,16 +18,6 @@ function appointmentMatchesSubmission(appointment, payload) {
   );
 }
 
-function findVerifiedAppointment(appointments, payload) {
-  if (!Array.isArray(appointments)) return null;
-  return (
-    appointments.find((appointment) =>
-      appointmentMatchesSubmission(appointment, payload),
-    ) || null
-  );
-}
-
 module.exports = {
   appointmentMatchesSubmission,
-  findVerifiedAppointment,
 };

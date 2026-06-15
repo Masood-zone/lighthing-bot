@@ -1,4 +1,7 @@
-const { VisaApplicationNotFoundError, VisaApiContractError } = require("./errors");
+const {
+  VisaApplicationNotFoundError,
+  VisaApiContractError,
+} = require("./errors");
 
 function collectValuesDeep(value, keyName, output = []) {
   if (value === null || value === undefined) return output;
@@ -60,6 +63,79 @@ function appointmentResponsesFromNetwork(networkState) {
   return appointments;
 }
 
+function bootstrapSources({ networkState, bootstrapData }) {
+  const sources = [];
+
+  if (bootstrapData !== undefined) sources.push(bootstrapData);
+
+  for (const response of networkState?.responses || []) {
+    if (response?.body) sources.push(response.body);
+  }
+
+  for (const request of networkState?.requests || []) {
+    const body = parseRequestPostData(request?.postData);
+    if (body) sources.push(body);
+  }
+
+  return sources;
+}
+
+function firstKnownValue(sources, keys) {
+  for (const key of keys) {
+    for (const source of sources) {
+      const value = firstValueDeep(source, key);
+      if (value !== null && value !== undefined && value !== "") {
+        return value;
+      }
+    }
+  }
+  return null;
+}
+
+function synthesizeAppointmentContext({ mode, networkState, bootstrapData }) {
+  const sources = bootstrapSources({ networkState, bootstrapData });
+  const applicationId = firstKnownValue(sources, ["applicationId"]);
+  const applicantId = firstKnownValue(sources, ["applicantId"]);
+  const appointmentId = firstKnownValue(sources, ["appointmentId"]);
+  const appointmentUUID = firstKnownValue(sources, ["appointmentUUID"]);
+  const applicantUUID = firstKnownValue(sources, ["applicantUUID"]);
+  const postUserId = firstKnownValue(sources, ["postUserId"]);
+  const missionId = firstKnownValue(sources, ["missionId"]);
+  const visaType = firstKnownValue(sources, ["visaType"]);
+  const visaClass = firstKnownValue(sources, ["visaClass"]);
+  const visaCategory = firstKnownValue(sources, ["visaCategory"]);
+  const appointmentLocationType =
+    firstKnownValue(sources, ["appointmentLocationType", "locationType"]) ||
+    "POST";
+  const appointmentStatus = mode === "reschedule" ? "SCHEDULED" : "NEW";
+
+  if (!applicationId || !applicantId || !visaType || !visaClass) {
+    return null;
+  }
+
+  return {
+    applicationId: String(applicationId),
+    applicantId: String(applicantId),
+    appointment: {
+      applicantId: String(applicantId),
+      applicantUUID: applicantUUID ?? null,
+      applicationId: String(applicationId),
+      appointmentId: appointmentId == null ? null : String(appointmentId),
+      appointmentLocationType,
+      appointmentStatus,
+      appointmentType: firstKnownValue(sources, ["appointmentType"]) || null,
+      appointmentUUID: appointmentUUID ?? null,
+      missionId: missionId ?? null,
+      postUserId: postUserId == null ? null : String(postUserId),
+      visaCategory: visaCategory ?? null,
+      visaClass: String(visaClass),
+      visaType: String(visaType),
+    },
+    appointments: [],
+    source: "synthetic_context_from_bootstrap",
+  };
+}
+
 function chooseAppointment(appointments, { mode, applicationId, applicantId }) {
   if (!Array.isArray(appointments)) return null;
   const wantedStatus = mode === "reschedule" ? "SCHEDULED" : "NEW";
@@ -100,12 +176,7 @@ function chooseAppointment(appointments, { mode, applicationId, applicantId }) {
   );
 }
 
-async function resolveApplicantContext({
-  client,
-  mode,
-  networkState,
-  bootstrapData,
-}) {
+async function resolveApplicantContext({ mode, networkState, bootstrapData }) {
   const knownApplicationIds = [
     ...applicationIdsFromNetwork(networkState),
     ...collectValuesDeep(bootstrapData, "applicationId"),
@@ -126,20 +197,13 @@ async function resolveApplicantContext({
     };
   }
 
-  let lastAppointments = [];
-  for (const applicationId of uniqueApplicationIds) {
-    // eslint-disable-next-line no-await-in-loop
-    const appointments = await client.searchCurrentAppointments(applicationId);
-    lastAppointments = appointments;
-    const appointment = chooseAppointment(appointments, { mode, applicationId });
-    if (appointment) {
-      return {
-        applicationId: String(appointment.applicationId || applicationId),
-        applicantId: String(appointment.applicantId || ""),
-        appointment,
-        appointments,
-      };
-    }
+  const synthetic = synthesizeAppointmentContext({
+    mode,
+    networkState,
+    bootstrapData,
+  });
+  if (synthetic) {
+    return synthetic;
   }
 
   if (!uniqueApplicationIds.length) {
@@ -151,13 +215,9 @@ async function resolveApplicantContext({
     }
   }
 
-  if (lastAppointments.length > 0) {
-    throw new VisaApiContractError(
-      `No ${mode === "reschedule" ? "SCHEDULED" : "NEW"} appointment found for resolved application`,
-    );
-  }
-
-  throw new VisaApplicationNotFoundError("No appointment records found");
+  throw new VisaApplicationNotFoundError(
+    "No appointment context found in authenticated responses",
+  );
 }
 
 function buildAvailabilityContext(appointment, { postUserIdOverride } = {}) {
@@ -184,5 +244,6 @@ module.exports = {
   firstValueDeep,
   resolveApplicantContext,
   chooseAppointment,
+  synthesizeAppointmentContext,
   buildAvailabilityContext,
 };

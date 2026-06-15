@@ -167,7 +167,7 @@ The following endpoints were observed in DevTools recordings. Treat them as cand
    POST /visaadministrationapi/v1/modifyslot/getSlotTime
 
 5. Existing appointment search:
-   POST /visaappointmentapi/appointments/search
+   Obsolete for the implemented API flow. Do not call `POST /visaappointmentapi/appointments/search`.
 
 6. Workflow transform/bootstrap data:
    GET /visaworkflowprocessor/workflow/getTransformData/{applicationId}
@@ -302,7 +302,7 @@ SECTION C — USER, APPLICANT, AND APPLICATION DISCOVERY
 26. If multiple applications are returned, how should the correct application be chosen?
 
 27. What is the purpose and contract of:
-    POST /visaappointmentapi/appointments/search?
+    Obsolete. The implemented API flow skips `POST /visaappointmentapi/appointments/search`.
 
 28. What is its exact request payload?
 
@@ -485,7 +485,7 @@ SECTION I — POST-BOOKING VERIFICATION
 
 77. Which endpoint should be called after submission to verify the appointment?
 
-78. Should appointments/search be called again?
+78. Should appointments/search be called again? No.
 
 79. Which fields must match before the worker emits COMPLETED?
 
@@ -616,7 +616,6 @@ The client should expose clearly separated methods similar to:
 
 - getAuthenticatedUser()
 - resolveApplicantContext()
-- searchCurrentAppointments()
 - getWorkflowData()
 - getFirstAvailableMonth()
 - getAvailableDates()

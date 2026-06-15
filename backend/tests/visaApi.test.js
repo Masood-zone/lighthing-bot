@@ -9,6 +9,7 @@ const {
   formatAppointmentTime,
   buildAppointmentPayload,
   buildAvailabilityContext,
+  resolveApplicantContext,
   appointmentMatchesSubmission,
   redact,
   decodeJwtExp,
@@ -142,6 +143,30 @@ test("availability context can force the selected Accra post user id", () => {
   );
 
   assert.equal(context.postUserId, "483");
+});
+
+test("applicant context resolves from bootstrap without appointment search", async () => {
+  const context = await resolveApplicantContext({
+    mode: "reschedule",
+    networkState: {},
+    bootstrapData: [
+      {
+        applicationId: "application-1",
+        applicantId: "applicant-1",
+        appointmentId: "appointment-1",
+        postUserId: 483,
+        visaType: "NIV",
+        visaClass: "F1",
+        appointmentLocationType: "POST",
+      },
+    ],
+  });
+
+  assert.equal(context.source, "synthetic_context_from_bootstrap");
+  assert.equal(context.applicationId, "application-1");
+  assert.equal(context.applicantId, "applicant-1");
+  assert.equal(context.appointment.appointmentId, "appointment-1");
+  assert.equal(context.appointment.appointmentStatus, "SCHEDULED");
 });
 
 test("verification requires scheduled status and selected slot fields", () => {

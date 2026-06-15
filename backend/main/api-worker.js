@@ -32,7 +32,6 @@ const {
   selectEarliestUsableSlot,
   buildAppointmentPayload,
   fingerprintAttempt,
-  findVerifiedAppointment,
   appointmentMatchesSubmission,
   resolveApplicantContext,
   buildAvailabilityContext,
@@ -549,18 +548,14 @@ async function submitAndVerify({ client, context, selectedDate, selectedSlot }) 
     return { payload, appointment: finalVerified, finalResponse };
   }
 
-  status("VERIFYING_BOOKING", "Verifying appointment through appointment search");
-  const appointments = await client.searchCurrentAppointments(payload.applicationId);
-  const verified = findVerifiedAppointment(appointments, payload);
-
-  if (verified) {
-    return { payload, appointment: verified, finalResponse };
-  }
-
   if (finalError) throw finalError;
 
+  status(
+    "VERIFYING_BOOKING",
+    "Final booking response did not match the selected appointment",
+  );
   throw new VisaBookingVerificationError(
-    "Final response did not verify through appointments/search",
+    "Final response did not match selected appointment",
     { responseBody: finalResponse },
   );
 }

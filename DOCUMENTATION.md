@@ -196,18 +196,18 @@ In API mode the worker:
 2. Captures the backend-only browser session, including `sessionStorage.authToken`, cookies, user-agent, CSRF/refresh headers, and dynamic correlation headers when observed.
 3. Calls `GET /visauserapi/portal/getuser`.
 4. Calls `GET /visaadministrationapi/v1/postconfiguration/get/483` to load the selected Accra post configuration.
-5. Resolves application and appointment context from authenticated bootstrap data and `POST /visaappointmentapi/appointments/search`.
+5. Resolves application and appointment context from authenticated bootstrap/browser data.
 6. Calls `POST /visaadministrationapi/v1/modifyslot/getFirstAvailableMonth`.
 7. Calls `POST /visaadministrationapi/v1/modifyslot/getSlotDates`.
 8. Filters dates using the configured absolute, days-from-now, or weeks-from-now window.
 9. Calls `POST /visaadministrationapi/v1/modifyslot/getSlotTime` for candidate dates and selects the earliest `UNBOOKED` + active slot.
 10. Submits pending appointments with `POST /visaappointmentapi/appointments/schedule/group` using a single object body.
 11. Submits reschedules with `PUT /visaappointmentapi/appointments/schedule/group` using a single object body.
-12. Verifies completion by matching the returned appointment fields, or through a fresh `appointments/search` result when the final response is ambiguous.
+12. Verifies completion by matching the returned appointment fields from the final booking response.
 
 The selected Accra post id defaults to `483` and can be overridden with `VISA_SELECTED_POST_USER_ID` for a future post/location.
 
-Final submission requests are not automatically retried after an ambiguous timeout or disconnect. The worker verifies the appointment first, then refreshes availability if the selected booking did not apply.
+Final submission requests are not automatically retried after an ambiguous timeout or disconnect. The worker requires the final response to match the selected booking before reporting completion.
 
 ### Account-Level Locking
 

@@ -284,32 +284,6 @@ class VisaApiClient {
     );
   }
 
-  async searchCurrentAppointments(applicationId) {
-    const body = {
-      operation: "AND",
-      searchObjects: [
-        {
-          key: "applicationId",
-          value: String(applicationId),
-          fieldType: "STRING",
-          operation: "EQUAL",
-        },
-      ],
-    };
-    const response = await this.request(
-      "POST",
-      "/visaappointmentapi/appointments/search",
-      { data: body, operation: "searchCurrentAppointments" },
-    );
-    if (!Array.isArray(response)) {
-      throw new VisaApiContractError("appointments/search did not return an array", {
-        operation: "searchCurrentAppointments",
-        responseBody: safeJson(response),
-      });
-    }
-    return response;
-  }
-
   async getPostConfiguration(postUserId) {
     const response = await this.request(
       "GET",
