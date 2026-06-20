@@ -18,7 +18,7 @@ The repository now uses the API execution path by default:
 | Worker entry | `backend/src/workerEntry.js` chooses `backend/main/api-worker.js` for API mode |
 | API worker | `backend/main/api-worker.js` launches Playwright for login/CAPTCHA, captures session state, then books through API calls |
 | API helpers | `backend/src/services/visaApi/*` contains the client, session extractor, applicant resolver, date selector, slot selector, payload builder, verifier, errors, and redaction helpers |
-| Accra post config | API mode calls `GET /visaadministrationapi/v1/postconfiguration/get/483` and uses post user id `483` as the selected Accra post |
+| Accra post | API mode uses post user id `483`; post-configuration lookup is not on the critical path |
 | Final pending request | `POST /visaappointmentapi/appointments/schedule/group` with one appointment object |
 | Final reschedule request | `PUT /visaappointmentapi/appointments/schedule/group` with one appointment object |
 | Completion rule | The final booking response must match selected appointment id, applicant id, application id, date, time, slot id, and `SCHEDULED` |

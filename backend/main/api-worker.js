@@ -65,8 +65,8 @@ const CONFIG = {
     Number(process.env.VISA_LOGIN_NAV_TIMEOUT_MS) || 3 * 60 * 1000,
   ),
   ATTEMPT_INTERVAL_MS: Math.max(
-    1000,
-    Number(process.env.VISA_ATTEMPT_INTERVAL_MS) || 30_000,
+    500,
+    Number(process.env.VISA_ATTEMPT_INTERVAL_MS) || 2000,
   ),
   DATE_START: process.env.VISA_MIN_DATE || process.env.VISA_DATE_START || "",
   DATE_END: process.env.VISA_MAX_DATE || process.env.VISA_DATE_END || "",
@@ -256,22 +256,25 @@ async function waitForLoginSurface(page, timeoutMs = CONFIG.LOGIN_WAIT_TIMEOUT_M
 }
 
 async function waitForLoginOrDashboard(page, timeoutMs = CONFIG.LOGIN_WAIT_TIMEOUT_MS) {
-  const dashboardWait = page
-    .waitForURL(/dashboard/i, { timeout: timeoutMs })
-    .then(() => true)
-    .catch(() => false);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (/dashboard/i.test(page.url())) return;
 
-  const displayNameWait = CONFIG.USER_DISPLAY_NAME
-    ? page
+    if (CONFIG.USER_DISPLAY_NAME) {
+      // eslint-disable-next-line no-await-in-loop
+      const visible = await page
         .getByText(CONFIG.USER_DISPLAY_NAME, { exact: false })
         .first()
-        .waitFor({ state: "visible", timeout: timeoutMs })
-        .then(() => true)
-        .catch(() => false)
-    : Promise.resolve(false);
+        .isVisible()
+        .catch(() => false);
+      if (visible) return;
+    }
 
-  const ok = await Promise.race([dashboardWait, displayNameWait]);
-  if (!ok) throw new Error("Login wait timed out.");
+    // Start the API handoff on the first authenticated browser tick.
+    // eslint-disable-next-line no-await-in-loop
+    await page.waitForTimeout(100).catch(() => {});
+  }
+  throw new Error("Login wait timed out.");
 }
 
 async function login(page) {
@@ -325,6 +328,39 @@ async function openDashboard(page) {
   await page.waitForURL(/dashboard/i, { timeout: 20000 }).catch(() => {});
 }
 
+async function establishApiSession({ page, context, networkState }) {
+  let attempt = 0;
+  while (true) {
+    attempt += 1;
+    try {
+      await login(page);
+      await openDashboard(page);
+
+      const auth = await captureVisaSession({
+        page,
+        context,
+        networkState,
+        bookingUserId: CONFIG.SESSION_ID,
+      });
+      if (!auth.authorizationHeader) {
+        throw new VisaApiUnauthorizedError(
+          "Platform auth token was not captured from sessionStorage or headers",
+        );
+      }
+      return auth;
+    } catch (error) {
+      if (page.isClosed()) throw error;
+      status(
+        "SESSION_BRIDGE_RETRY",
+        `Authenticated API handoff attempt ${attempt} was not ready; retaining Chrome and retrying`,
+      );
+      log("warn", formatApiError(error));
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
+    }
+  }
+}
+
 function numberOrNull(value) {
   if (value === "" || value === null || value === undefined) return null;
   const parsed = Number(value);
@@ -348,38 +384,40 @@ async function resolveContext({ client, networkState }) {
 
   const user = await client.getAuthenticatedUser();
   const bootstrapPieces = [user];
-
-  const postConfiguration = await client.getPostConfiguration(
-    CONFIG.SELECTED_POST_USER_ID,
-  );
-  status(
-    "POST_CONFIGURATION_READY",
-    `Loaded Accra post configuration for postUserId ${CONFIG.SELECTED_POST_USER_ID}`,
-  );
-
-  const history = await client
-    .getUserHistoryApplicantPaymentStatus()
-    .catch((error) => {
-      log("warn", `Could not load user history bootstrap: ${error.message}`);
-      return null;
-    });
-  if (history) bootstrapPieces.push(history);
-
-  const resolved = await resolveApplicantContext({
+  const resolverInput = {
     client,
     mode: CONFIG.RESCHEDULE ? "reschedule" : "pending",
     networkState,
-    bootstrapData: bootstrapPieces,
-  });
+  };
 
-  const workflowData = await client
-    .getWorkflowData(resolved.applicationId)
-    .catch((error) => {
-      log("warn", `Could not load workflow transform data: ${error.message}`);
-      return null;
+  // The captured DevTools traffic plus getuser normally contains everything
+  // required. Do not put auxiliary APIs in front of the first availability call.
+  let resolved;
+  try {
+    resolved = await resolveApplicantContext({
+      ...resolverInput,
+      bootstrapData: bootstrapPieces,
     });
-
-  if (workflowData) bootstrapPieces.push(workflowData);
+  } catch (initialError) {
+    const history = await client
+      .getUserHistoryApplicantPaymentStatus({
+        maxAttempts: 1,
+        timeoutMs: 3000,
+      })
+      .catch((error) => {
+        log(
+          "warn",
+          `Optional user history bootstrap unavailable; continuing from captured session: ${error.message}`,
+        );
+        return null;
+      });
+    if (!history) throw initialError;
+    bootstrapPieces.push(history);
+    resolved = await resolveApplicantContext({
+      ...resolverInput,
+      bootstrapData: bootstrapPieces,
+    });
+  }
 
   const selectedAppointment = {
     ...resolved.appointment,
@@ -392,8 +430,6 @@ async function resolveContext({ client, networkState }) {
   return {
     user,
     bootstrapData: bootstrapPieces,
-    workflowData,
-    postConfiguration,
     ...resolved,
     appointment: selectedAppointment,
     availability,
@@ -576,7 +612,7 @@ async function runApiHuntCycle({ client, context }) {
   return verified;
 }
 
-function isTerminalContractError(error) {
+function isRecoverableContextError(error) {
   return (
     error instanceof VisaApiContractError ||
     error instanceof VisaApplicationNotFoundError
@@ -593,24 +629,14 @@ async function main() {
 
   let client = null;
   let completionReported = false;
-  let terminalError = false;
   let resolvedContext = null;
 
   try {
-    await login(page);
-    await openDashboard(page);
-
-    let auth = await captureVisaSession({
+    let auth = await establishApiSession({
       page,
       context,
       networkState: capture.state,
-      bookingUserId: CONFIG.SESSION_ID,
     });
-
-    if (!auth.authorizationHeader) {
-      status("REAUTHENTICATION_REQUIRED", "Authenticated token was not captured");
-      throw new Error("Platform auth token was not captured from sessionStorage or headers.");
-    }
 
     client = new VisaApiClient({
       context,
@@ -678,12 +704,10 @@ async function main() {
 
         if (error instanceof VisaApiUnauthorizedError) {
           status("REAUTHENTICATION_REQUIRED", "Manual reauthentication required");
-          await login(page);
-          auth = await captureVisaSession({
+          auth = await establishApiSession({
             page,
             context,
             networkState: capture.state,
-            bookingUserId: CONFIG.SESSION_ID,
           });
           client.auth = auth;
           resolvedContext = null;
@@ -696,10 +720,14 @@ async function main() {
           break;
         }
 
-        if (isTerminalContractError(error)) {
-          status("INVALID_API_CONTRACT", formatApiError(error));
-          terminalError = true;
-          break;
+        if (isRecoverableContextError(error)) {
+          status(
+            "CONTEXT_NOT_READY",
+            `${formatApiError(error)}; retaining the authenticated session and retrying`,
+          );
+          resolvedContext = null;
+          await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
+          continue;
         }
 
         status("ERROR", formatApiError(error));
@@ -713,9 +741,6 @@ async function main() {
       await new Promise(() => {});
     }
 
-    if (terminalError) {
-      process.exitCode = 1;
-    }
   } finally {
     if (context) await context.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});

@@ -132,10 +132,19 @@ class VisaApiClient {
     });
   }
 
-  async request(method, path, { data, operation, readOnly = true } = {}) {
+  async request(
+    method,
+    path,
+    { data, operation, readOnly = true, maxAttempts, timeoutMs = 30_000 } = {},
+  ) {
     const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
-    const delays = [2000, 5000, 10000];
-    const attempts = readOnly ? 3 : 1;
+    const delays = [500, 1500, 3000];
+    const configuredAttempts = Number(maxAttempts);
+    const attempts = Number.isFinite(configuredAttempts)
+      ? Math.max(1, Math.trunc(configuredAttempts))
+      : readOnly
+        ? 3
+        : 1;
     const op = operation || `${method} ${path}`;
 
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -151,7 +160,7 @@ class VisaApiClient {
           method,
           headers: this._headers({ json: data !== undefined }),
           data: data === undefined ? undefined : JSON.stringify(data),
-          timeout: 30_000,
+          timeout: Math.max(250, Number(timeoutMs) || 30_000),
         });
 
         await this._updateAuthFromResponse(response);
@@ -276,11 +285,11 @@ class VisaApiClient {
     });
   }
 
-  async getUserHistoryApplicantPaymentStatus() {
+  async getUserHistoryApplicantPaymentStatus(options = {}) {
     return this.request(
       "GET",
       "/visaworkflowprocessor/workflow/getUserHistoryApplicantPaymentStatus",
-      { operation: "getUserHistoryApplicantPaymentStatus" },
+      { operation: "getUserHistoryApplicantPaymentStatus", ...options },
     );
   }
 
