@@ -113,6 +113,13 @@ const CONFIG = {
   ),
   PROXY_URL: process.env.VISA_PROXY_URL || process.env.VISA_PROXY_SERVER || "",
   PROXY_BYPASS: process.env.VISA_PROXY_BYPASS || "",
+  LOGIN_RETRY_MS: Math.max(
+    500,
+    Number(process.env.VISA_LOGIN_RETRY_MS) || 2000,
+  ),
+  API_TRACE:
+    process.env.VISA_API_TRACE !== "0" &&
+    process.env.VISA_API_TRACE !== "false",
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -475,6 +482,94 @@ function status(state, message) {
   });
 }
 
+const observedPlatformApis = new Map();
+
+function sanitizeApiUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    const queryKeys = [...url.searchParams.keys()];
+    return `${url.origin}${url.pathname}${
+      queryKeys.length ? `?${queryKeys.map((key) => `${key}=<redacted>`).join("&")}` : ""
+    }`;
+  } catch {
+    return String(rawUrl || "").split("?")[0];
+  }
+}
+
+function sanitizePayloadShape(value, depth = 0) {
+  if (depth > 4) return "<nested>";
+  if (Array.isArray(value)) {
+    return value.length ? [sanitizePayloadShape(value[0], depth + 1)] : [];
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => {
+        if (/pass|token|secret|captcha|authorization|cookie/i.test(key)) {
+          return [key, "<redacted>"];
+        }
+        return [key, sanitizePayloadShape(nested, depth + 1)];
+      }),
+    );
+  }
+  if (value == null) return value;
+  return `<${typeof value}>`;
+}
+
+function attachPlatformApiObserver(context) {
+  if (!CONFIG.API_TRACE) return;
+
+  context.on("response", async (response) => {
+    const request = response.request();
+    if (!["xhr", "fetch"].includes(request.resourceType())) return;
+
+    let requestUrl;
+    let platformOrigin;
+    try {
+      requestUrl = new URL(request.url());
+      platformOrigin = new URL(CONFIG.PLATFORM_URL).origin;
+    } catch {
+      return;
+    }
+    if (requestUrl.origin !== platformOrigin) return;
+
+    const method = request.method().toUpperCase();
+    const safeUrl = sanitizeApiUrl(request.url());
+    const key = `${method} ${requestUrl.pathname}`;
+    const responseStatus = response.status();
+    const previous = observedPlatformApis.get(key);
+    let payloadShape = null;
+
+    if (!previous && !["GET", "HEAD"].includes(method)) {
+      try {
+        payloadShape = sanitizePayloadShape(request.postDataJSON());
+      } catch {
+        payloadShape = request.postData() ? "<non-json body redacted>" : null;
+      }
+    }
+
+    observedPlatformApis.set(key, {
+      method,
+      url: safeUrl,
+      lastStatus: responseStatus,
+      payloadShape: payloadShape || previous?.payloadShape || null,
+    });
+
+    if (!previous) {
+      status(
+        "API_DISCOVERED",
+        `${method} ${safeUrl} -> ${responseStatus}${
+          payloadShape ? ` payload-shape=${JSON.stringify(payloadShape)}` : ""
+        }`,
+      );
+    } else if (responseStatus >= 500) {
+      status(
+        "API_TRANSIENT_ERROR",
+        `${method} ${safeUrl} returned ${responseStatus}; keeping session alive`,
+      );
+    }
+  });
+}
+
 function normalizeProxyUrl(raw) {
   const trimmed = String(raw || "").trim();
   if (!trimmed) return "";
@@ -551,6 +646,7 @@ async function launchBrowser() {
       launchOptions,
     );
     const page = context.pages()[0] || (await context.newPage());
+    attachPlatformApiObserver(context);
     page.setDefaultTimeout(15000);
     page.setDefaultNavigationTimeout(CONFIG.LOGIN_NAV_TIMEOUT_MS);
     return {
@@ -562,6 +658,7 @@ async function launchBrowser() {
 
   const browser = await chromium.launch(launchOptions);
   const context = await browser.newContext({ viewport: null });
+  attachPlatformApiObserver(context);
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
   page.setDefaultNavigationTimeout(CONFIG.LOGIN_NAV_TIMEOUT_MS);
@@ -614,24 +711,43 @@ async function waitForLoginOrDashboard(
   page,
   timeoutMs = CONFIG.LOGIN_WAIT_TIMEOUT_MS,
 ) {
-  const dashboardWait = page
-    .waitForURL(/dashboard/i, { timeout: timeoutMs })
-    .then(() => true)
-    .catch(() => false);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (/dashboard/i.test(page.url())) return true;
 
-  const displayNameWait = page
-    .getByText(CONFIG.USER_DISPLAY_NAME, { exact: false })
-    .first()
-    .waitFor({ state: "visible", timeout: timeoutMs })
-    .then(() => true)
-    .catch(() => false);
+    // Poll both signals without waiting for either locator's long timeout.
+    // This lets the worker start on the first authenticated browser tick.
+    // eslint-disable-next-line no-await-in-loop
+    const displayNameVisible = await page
+      .getByText(CONFIG.USER_DISPLAY_NAME, { exact: false })
+      .first()
+      .isVisible()
+      .catch(() => false);
+    if (displayNameVisible) return true;
 
-  const ok = await Promise.race([dashboardWait, displayNameWait]);
-  if (!ok) {
-    throw new Error("Login wait timed out.");
+    // eslint-disable-next-line no-await-in-loop
+    await page.waitForTimeout(100).catch(() => {});
   }
+  throw new Error("Login wait timed out.");
+}
 
-  return true;
+async function loginWithRetry(page) {
+  let attempt = 0;
+  while (true) {
+    attempt += 1;
+    try {
+      await login(page);
+      return;
+    } catch (error) {
+      if (page.isClosed()) throw error;
+      status(
+        "LOGIN_RETRY",
+        `Login attempt ${attempt} failed (${error?.message || String(error)}); retrying without closing the session`,
+      );
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(CONFIG.LOGIN_RETRY_MS);
+    }
+  }
 }
 
 async function login(page) {
@@ -3003,7 +3119,7 @@ async function main() {
   let completionReported = false;
 
   try {
-    await login(page);
+    await loginWithRetry(page);
 
     while (true) {
       const result = await attemptBooking(page).catch((error) => {
