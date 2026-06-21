@@ -13,7 +13,24 @@ const {
   appointmentMatchesSubmission,
   redact,
   decodeJwtExp,
+  VisaApiClient,
+  VisaApplicationNotFoundError,
+  bootstrapAppointmentSurface,
+  shouldRunContextBootstrap,
 } = require("../src/services/visaApi");
+
+function appointmentRecord(overrides = {}) {
+  return {
+    applicationId: "application-1",
+    applicantId: "applicant-1",
+    appointmentId: "appointment-1",
+    appointmentLocationType: "POST",
+    appointmentStatus: "NEW",
+    visaType: "NIV",
+    visaClass: "F1",
+    ...overrides,
+  };
+}
 
 test("date selector returns no selection for empty date arrays", () => {
   const result = selectAvailableDate({
@@ -167,6 +184,167 @@ test("applicant context resolves from bootstrap without appointment search", asy
   assert.equal(context.applicantId, "applicant-1");
   assert.equal(context.appointment.appointmentId, "appointment-1");
   assert.equal(context.appointment.appointmentStatus, "SCHEDULED");
+});
+
+test("pending context resolves from a captured NEW appointment", async () => {
+  const context = await resolveApplicantContext({
+    mode: "pending",
+    networkState: {
+      responses: [
+        {
+          url: "https://www.usvisaappt.com/visaappointmentapi/appointments/search",
+          body: [appointmentRecord()],
+        },
+      ],
+    },
+    bootstrapData: [],
+  });
+
+  assert.equal(context.source, "captured_appointments_search");
+  assert.equal(context.appointment.appointmentStatus, "NEW");
+});
+
+test("reschedule context resolves from a captured SCHEDULED appointment", async () => {
+  const context = await resolveApplicantContext({
+    mode: "reschedule",
+    networkState: {
+      responses: [
+        {
+          url: "https://www.usvisaappt.com/visaappointmentapi/appointments/search",
+          body: [appointmentRecord({ appointmentStatus: "SCHEDULED" })],
+        },
+      ],
+    },
+    bootstrapData: [],
+  });
+
+  assert.equal(context.appointment.appointmentStatus, "SCHEDULED");
+});
+
+test("resolver uses direct appointment search when only applicationId is known", async () => {
+  let searchedApplicationId = null;
+  const context = await resolveApplicantContext({
+    client: {
+      async searchCurrentAppointments(applicationId) {
+        searchedApplicationId = applicationId;
+        return [appointmentRecord()];
+      },
+    },
+    mode: "pending",
+    networkState: {},
+    bootstrapData: [{ applicationId: "application-1" }],
+    allowDirectSearch: true,
+  });
+
+  assert.equal(searchedApplicationId, "application-1");
+  assert.equal(context.source, "direct_appointments_search");
+});
+
+test("resolver rejects incomplete and wrong-status appointment records", async () => {
+  await assert.rejects(
+    resolveApplicantContext({
+      mode: "pending",
+      networkState: {
+        responses: [
+          {
+            url: "https://www.usvisaappt.com/visaappointmentapi/appointments/search",
+            body: [
+              appointmentRecord({
+                appointmentId: null,
+                appointmentStatus: "SCHEDULED",
+              }),
+            ],
+          },
+        ],
+      },
+      bootstrapData: [],
+    }),
+    VisaApplicationNotFoundError,
+  );
+});
+
+test("browser bootstrap opens pending appointment and awaits appointment search", async () => {
+  let clicked = false;
+  const visibleCandidate = {
+    first() {
+      return this;
+    },
+    async isVisible() {
+      return true;
+    },
+    async evaluate() {
+      clicked = true;
+    },
+  };
+  const page = {
+    url: () => "https://www.usvisaappt.com/visaapplicantui/dashboard",
+    getByRole: () => visibleCandidate,
+    getByText: () => visibleCandidate,
+    async waitForResponse(predicate) {
+      const response = {
+        url: () =>
+          "https://www.usvisaappt.com/visaappointmentapi/appointments/search",
+        status: () => 200,
+      };
+      assert.equal(predicate(response), true);
+      return response;
+    },
+    async waitForTimeout() {},
+  };
+
+  const result = await bootstrapAppointmentSurface({
+    page,
+    appBaseUrl: "https://www.usvisaappt.com/visaapplicantui",
+    mode: "pending",
+  });
+  assert.equal(clicked, true);
+  assert.deepEqual(result, { captured: true, status: 200 });
+});
+
+test("browser context bootstrap is throttled during unresolved retries", () => {
+  const cache = { browserAttemptedAt: 1000 };
+  assert.equal(shouldRunContextBootstrap(cache, 2000, 30_000), false);
+  assert.equal(shouldRunContextBootstrap(cache, 31_000, 30_000), true);
+});
+
+test("read-only search retries a transient 500 but final mutation is single-shot", async () => {
+  let searchCalls = 0;
+  const makeResponse = (status, body) => ({
+    status: () => status,
+    headers: () => ({}),
+    text: async () => JSON.stringify(body),
+  });
+  const client = new VisaApiClient({
+    context: {
+      request: {
+        async fetch(url) {
+          if (url.includes("/appointments/search")) {
+            searchCalls += 1;
+            return searchCalls === 1
+              ? makeResponse(500, { error: "temporary" })
+              : makeResponse(200, [appointmentRecord()]);
+          }
+          return makeResponse(500, { error: "temporary" });
+        },
+      },
+    },
+    page: { evaluate: async () => {} },
+    auth: {},
+  });
+
+  const records = await client.searchCurrentAppointments("application-1", {
+    maxAttempts: 2,
+  });
+  assert.equal(searchCalls, 2);
+  assert.equal(records.length, 1);
+
+  let mutationCalls = 0;
+  client.context.request.fetch = async () => {
+    mutationCalls += 1;
+    return makeResponse(500, { error: "unknown outcome" });
+  };
+  await assert.rejects(client.submitPendingAppointment({ appointmentId: "1" }));
+  assert.equal(mutationCalls, 1);
 });
 
 test("verification requires scheduled status and selected slot fields", () => {
