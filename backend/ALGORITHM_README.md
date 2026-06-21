@@ -81,7 +81,7 @@ VISA_EXECUTION_MODE=dom
 
 In API mode Playwright remains responsible for browser launch, manual login, manual CAPTCHA completion, authenticated session capture, and reauthentication. The worker then uses the authenticated browser context for API requests instead of calendar DOM inspection or final button clicks.
 
-API mode emits the same IPC message shape as the DOM worker and adds more granular states such as `SESSION_CAPTURED`, `SESSION_READY`, `RESOLVING_APPLICATION`, `SCANNING_DATES`, `NO_DATES_AVAILABLE`, `FETCHING_SLOTS`, `SUBMITTING_BOOKING`, `VERIFYING_BOOKING`, `BOOKING_OUTCOME_UNKNOWN`, and `REAUTHENTICATION_REQUIRED`.
+API mode emits the same IPC message shape as the DOM worker and adds more granular states such as `SESSION_CAPTURED`, `SESSION_READY`, `CONTEXT_BOOTSTRAP`, `CONTEXT_SOURCE_SELECTED`, `CONTEXT_ACQUISITION_WAIT`, `SCANNING_DATES`, `FETCHING_SLOTS`, `SUBMITTING_BOOKING`, `VERIFYING_BOOKING`, and `REAUTHENTICATION_REQUIRED`.
 
 ### 1) Startup (backend)
 
@@ -178,13 +178,13 @@ The API worker lives in `backend/main/api-worker.js`, with reusable helpers in `
 3. Capture `sessionStorage.authToken`, user-agent, cookies, and observed auth response headers into a backend-only session object.
 4. Use `browserContext.request` so requests share the authenticated browser session and proxy.
 5. Resolve the authenticated user through `GET /visauserapi/portal/getuser`.
-6. Resolve the correct application/appointment record immediately from authenticated DevTools traffic and `getuser`; use user history only as a short fallback.
+6. Resolve a complete mode-correct appointment from DevTools traffic and `getuser`; use history once, browser-assisted appointment capture next, and a direct read-only appointment search last.
 7. Use the `NEW` appointment for pending mode and the `SCHEDULED` appointment for reschedule mode.
 8. Query first available month, available dates, and available slot times through the confirmed `modifyslot` endpoints.
 9. Filter dates with the same configured administrator date preferences.
 10. Submit pending bookings with `POST /visaappointmentapi/appointments/schedule/group`.
 11. Submit reschedules with `PUT /visaappointmentapi/appointments/schedule/group` using one appointment object.
-12. Verify by matching appointment id, applicant id, application id, date, time, slot id, and `SCHEDULED` status from the final booking response.
+12. Verify by matching appointment id, applicant id, application id, date, time, slot id, and `SCHEDULED` status. An ambiguous mutation gets one read-only appointment search and is never replayed automatically.
 
 The selected Accra post id defaults to `483`; use `VISA_SELECTED_POST_USER_ID` to override it for another location later.
 
