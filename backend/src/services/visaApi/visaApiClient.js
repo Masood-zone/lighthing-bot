@@ -293,31 +293,34 @@ class VisaApiClient {
     );
   }
 
-  async getPostConfiguration(postUserId) {
+  async searchCurrentAppointments(applicationId, options = {}) {
+    const body = {
+      operation: "AND",
+      searchObjects: [
+        {
+          key: "applicationId",
+          value: String(applicationId),
+          fieldType: "STRING",
+          operation: "EQUAL",
+        },
+      ],
+    };
     const response = await this.request(
-      "GET",
-      `/visaadministrationapi/v1/postconfiguration/get/${encodeURIComponent(
-        postUserId,
-      )}`,
-      { operation: "getPostConfiguration" },
+      "POST",
+      "/visaappointmentapi/appointments/search",
+      {
+        data: body,
+        operation: "searchCurrentAppointments",
+        ...options,
+      },
     );
     if (!Array.isArray(response)) {
-      throw new VisaApiContractError("postconfiguration/get did not return an array", {
-        operation: "getPostConfiguration",
+      throw new VisaApiContractError("appointments/search did not return an array", {
+        operation: "searchCurrentAppointments",
         responseBody: safeJson(response),
       });
     }
     return response;
-  }
-
-  async getWorkflowData(applicationId) {
-    return this.request(
-      "GET",
-      `/visaworkflowprocessor/workflow/getTransformData/${encodeURIComponent(
-        applicationId,
-      )}`,
-      { operation: "getWorkflowData" },
-    );
   }
 
   async getFirstAvailableMonth(context) {
