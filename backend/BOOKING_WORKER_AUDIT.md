@@ -18,10 +18,12 @@ The repository now uses the API execution path by default:
 | Worker entry | `backend/src/workerEntry.js` chooses `backend/main/api-worker.js` for API mode |
 | API worker | `backend/main/api-worker.js` launches Playwright for login/CAPTCHA, captures session state, then books through API calls |
 | API helpers | `backend/src/services/visaApi/*` contains the client, session extractor, applicant resolver, date selector, slot selector, payload builder, verifier, errors, and redaction helpers |
+| Context acquisition | Captured appointment response -> complete bootstrap data -> browser-assisted appointment surface -> direct read-only search fallback |
 | Accra post | API mode uses post user id `483`; post-configuration lookup is not on the critical path |
 | Final pending request | `POST /visaappointmentapi/appointments/schedule/group` with one appointment object |
 | Final reschedule request | `PUT /visaappointmentapi/appointments/schedule/group` with one appointment object |
 | Completion rule | The final booking response must match selected appointment id, applicant id, application id, date, time, slot id, and `SCHEDULED` |
+| Ambiguous mutation | Verify once with appointment search, then pause for manual review; never replay POST/PUT automatically |
 | Locking | `WorkerPool` rejects another queued/running session for the same visa login host and booking email |
 
 API mode does not scan green calendar colors, click time slots, manipulate the applicant checkbox, or click final booking buttons. DOM mode remains available for fallback before any API final submission is attempted.
