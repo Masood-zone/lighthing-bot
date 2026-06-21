@@ -7,5 +7,6 @@ module.exports = {
   ...require("./bookingVerifier"),
   ...require("./sessionExtractor"),
   ...require("./applicantResolver"),
+  ...require("./contextBootstrap"),
   ...require("./visaApiClient"),
 };
