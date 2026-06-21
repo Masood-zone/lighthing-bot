@@ -92,6 +92,53 @@ function firstKnownValue(sources, keys) {
   return null;
 }
 
+const REQUIRED_APPOINTMENT_FIELDS = [
+  "applicationId",
+  "applicantId",
+  "appointmentId",
+  "visaType",
+  "visaClass",
+  "appointmentLocationType",
+];
+
+function missingAppointmentFields(appointment) {
+  return REQUIRED_APPOINTMENT_FIELDS.filter((key) => {
+    const value = appointment?.[key];
+    return value === null || value === undefined || value === "";
+  });
+}
+
+function isCompleteAppointment(appointment, mode) {
+  const expectedStatus = mode === "reschedule" ? "SCHEDULED" : "NEW";
+  return (
+    missingAppointmentFields(appointment).length === 0 &&
+    String(appointment?.appointmentStatus || "").toUpperCase() === expectedStatus
+  );
+}
+
+function contextDiagnostics({ mode, networkState, bootstrapData }) {
+  const sources = bootstrapSources({ networkState, bootstrapData });
+  const candidate = {
+    applicationId: firstKnownValue(sources, ["applicationId"]),
+    applicantId: firstKnownValue(sources, ["applicantId"]),
+    appointmentId: firstKnownValue(sources, ["appointmentId"]),
+    visaType: firstKnownValue(sources, ["visaType"]),
+    visaClass: firstKnownValue(sources, ["visaClass"]),
+    appointmentLocationType: firstKnownValue(sources, [
+      "appointmentLocationType",
+      "locationType",
+    ]),
+  };
+  return {
+    mode,
+    missingFields: missingAppointmentFields(candidate),
+    capturedRequests: networkState?.requests?.length || 0,
+    capturedResponses: networkState?.responses?.length || 0,
+    appointmentSearchResponses: appointmentResponsesFromNetwork(networkState).length,
+    applicationIds: applicationIdsFromNetwork(networkState).length,
+  };
+}
+
 function synthesizeAppointmentContext({ mode, networkState, bootstrapData }) {
   const sources = bootstrapSources({ networkState, bootstrapData });
   const applicationId = firstKnownValue(sources, ["applicationId"]);
@@ -104,12 +151,20 @@ function synthesizeAppointmentContext({ mode, networkState, bootstrapData }) {
   const visaType = firstKnownValue(sources, ["visaType"]);
   const visaClass = firstKnownValue(sources, ["visaClass"]);
   const visaCategory = firstKnownValue(sources, ["visaCategory"]);
-  const appointmentLocationType =
-    firstKnownValue(sources, ["appointmentLocationType", "locationType"]) ||
-    "POST";
+  const appointmentLocationType = firstKnownValue(sources, [
+    "appointmentLocationType",
+    "locationType",
+  ]);
   const appointmentStatus = mode === "reschedule" ? "SCHEDULED" : "NEW";
 
-  if (!applicationId || !applicantId || !visaType || !visaClass) {
+  if (
+    !applicationId ||
+    !applicantId ||
+    !appointmentId ||
+    !visaType ||
+    !visaClass ||
+    !appointmentLocationType
+  ) {
     return null;
   }
 
@@ -140,7 +195,10 @@ function chooseAppointment(appointments, { mode, applicationId, applicantId }) {
   if (!Array.isArray(appointments)) return null;
   const wantedStatus = mode === "reschedule" ? "SCHEDULED" : "NEW";
   const matches = appointments.filter((appointment) => {
-    if (String(appointment.appointmentStatus) !== wantedStatus) return false;
+    if (String(appointment.appointmentStatus).toUpperCase() !== wantedStatus) {
+      return false;
+    }
+    if (!isCompleteAppointment(appointment, mode)) return false;
     if (
       applicationId &&
       String(appointment.applicationId) !== String(applicationId)
@@ -176,7 +234,13 @@ function chooseAppointment(appointments, { mode, applicationId, applicantId }) {
   );
 }
 
-async function resolveApplicantContext({ mode, networkState, bootstrapData }) {
+async function resolveApplicantContext({
+  client,
+  mode,
+  networkState,
+  bootstrapData,
+  allowDirectSearch = false,
+}) {
   const knownApplicationIds = [
     ...applicationIdsFromNetwork(networkState),
     ...collectValuesDeep(bootstrapData, "applicationId"),
@@ -204,6 +268,33 @@ async function resolveApplicantContext({ mode, networkState, bootstrapData }) {
   });
   if (synthetic) {
     return synthetic;
+  }
+
+  if (allowDirectSearch && client) {
+    let lastAppointments = [];
+    for (const applicationId of uniqueApplicationIds) {
+      // eslint-disable-next-line no-await-in-loop
+      const appointments = await client.searchCurrentAppointments(applicationId);
+      lastAppointments = appointments;
+      const appointment = chooseAppointment(appointments, {
+        mode,
+        applicationId,
+      });
+      if (appointment) {
+        return {
+          applicationId: String(appointment.applicationId || applicationId),
+          applicantId: String(appointment.applicantId || ""),
+          appointment,
+          appointments,
+          source: "direct_appointments_search",
+        };
+      }
+    }
+    if (lastAppointments.length > 0) {
+      throw new VisaApiContractError(
+        `No complete ${mode === "reschedule" ? "SCHEDULED" : "NEW"} appointment found`,
+      );
+    }
   }
 
   if (!uniqueApplicationIds.length) {
@@ -245,5 +336,10 @@ module.exports = {
   resolveApplicantContext,
   chooseAppointment,
   synthesizeAppointmentContext,
+  applicationIdsFromNetwork,
+  appointmentResponsesFromNetwork,
+  missingAppointmentFields,
+  isCompleteAppointment,
+  contextDiagnostics,
   buildAvailabilityContext,
 };
