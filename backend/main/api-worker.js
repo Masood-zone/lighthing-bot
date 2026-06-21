@@ -35,7 +35,9 @@ const {
   appointmentMatchesSubmission,
   resolveApplicantContext,
   buildAvailabilityContext,
-  collectValuesDeep,
+  contextDiagnostics,
+  bootstrapAppointmentSurface,
+  shouldRunContextBootstrap,
   parseIsoDateOnly,
   redact,
 } = require("../src/services/visaApi");
@@ -67,6 +69,14 @@ const CONFIG = {
   ATTEMPT_INTERVAL_MS: Math.max(
     500,
     Number(process.env.VISA_ATTEMPT_INTERVAL_MS) || 2000,
+  ),
+  CONTEXT_RETRY_MS: Math.max(
+    5000,
+    Number(process.env.VISA_CONTEXT_RETRY_MS) || 30_000,
+  ),
+  CONTEXT_BOOTSTRAP_TIMEOUT_MS: Math.max(
+    3000,
+    Number(process.env.VISA_CONTEXT_BOOTSTRAP_TIMEOUT_MS) || 10_000,
   ),
   DATE_START: process.env.VISA_MIN_DATE || process.env.VISA_DATE_START || "",
   DATE_END: process.env.VISA_MAX_DATE || process.env.VISA_DATE_END || "",
@@ -379,19 +389,20 @@ function getDatePreferencesSnapshot() {
   });
 }
 
-async function resolveContext({ client, networkState }) {
+async function resolveContext({ client, networkState, page, bootstrapCache }) {
   status("RESOLVING_APPLICATION", "Resolving user and appointment context");
 
-  const user = await client.getAuthenticatedUser();
-  const bootstrapPieces = [user];
+  if (!bootstrapCache.user) {
+    bootstrapCache.user = await client.getAuthenticatedUser();
+  }
+  const bootstrapPieces = [bootstrapCache.user];
+  if (bootstrapCache.history) bootstrapPieces.push(bootstrapCache.history);
   const resolverInput = {
     client,
     mode: CONFIG.RESCHEDULE ? "reschedule" : "pending",
     networkState,
   };
 
-  // The captured DevTools traffic plus getuser normally contains everything
-  // required. Do not put auxiliary APIs in front of the first availability call.
   let resolved;
   try {
     resolved = await resolveApplicantContext({
@@ -399,24 +410,67 @@ async function resolveContext({ client, networkState }) {
       bootstrapData: bootstrapPieces,
     });
   } catch (initialError) {
-    const history = await client
-      .getUserHistoryApplicantPaymentStatus({
-        maxAttempts: 1,
-        timeoutMs: 3000,
-      })
-      .catch((error) => {
-        log(
-          "warn",
-          `Optional user history bootstrap unavailable; continuing from captured session: ${error.message}`,
-        );
-        return null;
+    if (!bootstrapCache.historyAttempted) {
+      bootstrapCache.historyAttempted = true;
+      bootstrapCache.history = await client
+        .getUserHistoryApplicantPaymentStatus({
+          maxAttempts: 1,
+          timeoutMs: 3000,
+        })
+        .catch((error) => {
+          log("warn", `Optional context fallback unavailable: ${error.message}`);
+          return null;
+        });
+      if (bootstrapCache.history) bootstrapPieces.push(bootstrapCache.history);
+    }
+
+    try {
+      resolved = await resolveApplicantContext({
+        ...resolverInput,
+        bootstrapData: bootstrapPieces,
       });
-    if (!history) throw initialError;
-    bootstrapPieces.push(history);
-    resolved = await resolveApplicantContext({
-      ...resolverInput,
-      bootstrapData: bootstrapPieces,
-    });
+    } catch {
+      if (
+        shouldRunContextBootstrap(
+          bootstrapCache,
+          Date.now(),
+          CONFIG.CONTEXT_RETRY_MS,
+        )
+      ) {
+        bootstrapCache.browserAttemptedAt = Date.now();
+        const before = contextDiagnostics({
+          ...resolverInput,
+          bootstrapData: bootstrapPieces,
+        });
+        status(
+          "CONTEXT_BOOTSTRAP",
+          `Opening ${resolverInput.mode} appointment surface; missing=${before.missingFields.join(",") || "appointment record"}`,
+        );
+        const browserBootstrap = await bootstrapAppointmentSurface({
+          page,
+          appBaseUrl: getAppBaseUrl(),
+          mode: resolverInput.mode,
+          timeoutMs: CONFIG.CONTEXT_BOOTSTRAP_TIMEOUT_MS,
+        });
+        log(
+          "info",
+          `Context browser bootstrap captured=${browserBootstrap.captured} status=${browserBootstrap.status ?? "none"}`,
+        );
+      }
+
+      resolved = await resolveApplicantContext({
+        ...resolverInput,
+        bootstrapData: bootstrapPieces,
+        allowDirectSearch: true,
+      }).catch((error) => {
+        const diagnostics = contextDiagnostics({
+          ...resolverInput,
+          bootstrapData: bootstrapPieces,
+        });
+        error.contextDiagnostics = diagnostics;
+        throw error;
+      });
+    }
   }
 
   const selectedAppointment = {
@@ -427,8 +481,13 @@ async function resolveContext({ client, networkState }) {
     postUserIdOverride: CONFIG.SELECTED_POST_USER_ID,
   });
 
+  status(
+    "CONTEXT_SOURCE_SELECTED",
+    `Appointment context ready from ${resolved.source || "resolved_api_record"}; mode=${resolverInput.mode}`,
+  );
+
   return {
-    user,
+    user: bootstrapCache.user,
     bootstrapData: bootstrapPieces,
     ...resolved,
     appointment: selectedAppointment,
@@ -584,7 +643,29 @@ async function submitAndVerify({ client, context, selectedDate, selectedSlot }) 
     return { payload, appointment: finalVerified, finalResponse };
   }
 
-  if (finalError) throw finalError;
+  status(
+    "VERIFYING_BOOKING",
+    "Checking appointment search after an unconfirmed final response",
+  );
+  const appointments = await client
+    .searchCurrentAppointments(payload.applicationId)
+    .catch((error) => {
+      log("warn", `Read-only booking verification failed: ${formatApiError(error)}`);
+      return [];
+    });
+  const searchedMatch = appointments.find((appointment) =>
+    appointmentMatchesSubmission(appointment, payload),
+  );
+  if (searchedMatch) {
+    return { payload, appointment: searchedMatch, finalResponse };
+  }
+
+  if (finalError) {
+    throw new VisaBookingVerificationError(
+      `Final mutation was not confirmed after read-only verification: ${formatApiError(finalError)}`,
+      { responseBody: finalError.responseBody },
+    );
+  }
 
   status(
     "VERIFYING_BOOKING",
@@ -630,6 +711,12 @@ async function main() {
   let client = null;
   let completionReported = false;
   let resolvedContext = null;
+  let bootstrapCache = {
+    user: null,
+    history: null,
+    historyAttempted: false,
+    browserAttemptedAt: 0,
+  };
 
   try {
     let auth = await establishApiSession({
@@ -663,6 +750,8 @@ async function main() {
           resolvedContext = await resolveContext({
             client,
             networkState: capture.state,
+            page,
+            bootstrapCache,
           });
         }
 
@@ -684,6 +773,18 @@ async function main() {
           status("WAITING_NEXT_SCAN", "Waiting before refreshing availability");
           await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
           continue;
+        }
+
+        if (error instanceof VisaBookingVerificationError) {
+          status(
+            "MANUAL_VERIFICATION_REQUIRED",
+            `${formatApiError(error)}; final mutation will not be replayed`,
+          );
+          status(
+            "PAUSED",
+            "Session retained for manual appointment verification",
+          );
+          await new Promise(() => {});
         }
 
         if (error instanceof VisaApiRateLimitedError) {
@@ -711,6 +812,12 @@ async function main() {
           });
           client.auth = auth;
           resolvedContext = null;
+          bootstrapCache = {
+            user: null,
+            history: null,
+            historyAttempted: false,
+            browserAttemptedAt: 0,
+          };
           status("SESSION_READY", "API session refreshed after reauthentication");
           continue;
         }
@@ -721,12 +828,13 @@ async function main() {
         }
 
         if (isRecoverableContextError(error)) {
+          const diagnostics = error.contextDiagnostics || {};
           status(
-            "CONTEXT_NOT_READY",
-            `${formatApiError(error)}; retaining the authenticated session and retrying`,
+            "CONTEXT_ACQUISITION_WAIT",
+            `${formatApiError(error)}; missing=${(diagnostics.missingFields || []).join(",") || "complete appointment record"}; capturedResponses=${diagnostics.capturedResponses || 0}; appointmentRecords=${diagnostics.appointmentSearchResponses || 0}; retrying in ${Math.ceil(CONFIG.CONTEXT_RETRY_MS / 1000)}s`,
           );
           resolvedContext = null;
-          await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
+          await sleep(CONFIG.CONTEXT_RETRY_MS);
           continue;
         }
 
