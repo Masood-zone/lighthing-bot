@@ -76,7 +76,7 @@ const CONFIG = {
   ),
   CONTEXT_BOOTSTRAP_TIMEOUT_MS: Math.max(
     3000,
-    Number(process.env.VISA_CONTEXT_BOOTSTRAP_TIMEOUT_MS) || 10_000,
+    Number(process.env.VISA_CONTEXT_BOOTSTRAP_TIMEOUT_MS) || 60_000,
   ),
   DATE_START: process.env.VISA_MIN_DATE || process.env.VISA_DATE_START || "",
   DATE_END: process.env.VISA_MAX_DATE || process.env.VISA_DATE_END || "",
@@ -451,6 +451,9 @@ async function resolveContext({ client, networkState, page, bootstrapCache }) {
           appBaseUrl: getAppBaseUrl(),
           mode: resolverInput.mode,
           timeoutMs: CONFIG.CONTEXT_BOOTSTRAP_TIMEOUT_MS,
+          userDisplayName: CONFIG.USER_DISPLAY_NAME,
+          userEmail: CONFIG.USER_EMAIL,
+          status,
         });
         log(
           "info",
