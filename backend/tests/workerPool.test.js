@@ -7,7 +7,7 @@ const path = require("node:path");
 process.env.VISA_SECRET_KEY = "test-secret-for-worker-pool";
 
 const { SessionStore } = require("../src/store/sessionStore");
-const { WorkerPool } = require("../src/queue/workerPool");
+const { WorkerPool, resolveSessionExecutionMode } = require("../src/queue/workerPool");
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "lightingbot-test-"));
@@ -53,4 +53,49 @@ test("worker pool rejects a second queued session for the same booking account",
 
   pool.stop(first.id);
   assert.deepEqual(pool.enqueue(second.id), { queued: true, id: second.id });
+});
+
+test("session store persists execution mode and defaults missing mode to dom", () => {
+  const dataDir = makeTempDir();
+  const store = new SessionStore({ dataDir });
+
+  const apiUser = store.createSession({
+    loginUrl: "https://www.usvisaappt.com/visaapplicantui/login",
+    email: "api@example.com",
+    password: "secret",
+    displayName: "API User",
+    pickupPoint: "Accra",
+    headless: true,
+    reschedule: true,
+    executionMode: "api",
+  });
+
+  assert.equal(apiUser.config.executionMode, "api");
+
+  const domUser = store.createSession({
+    loginUrl: "https://www.usvisaappt.com/visaapplicantui/login",
+    email: "dom@example.com",
+    password: "secret",
+    displayName: "DOM User",
+    pickupPoint: "Accra",
+    headless: true,
+    reschedule: false,
+  });
+
+  assert.equal(domUser.config.executionMode, "dom");
+
+  const updated = store.updateSession(apiUser.id, { executionMode: "dom" });
+  assert.equal(updated.config.executionMode, "dom");
+});
+
+test("worker pool resolves per-user execution mode with dom as fallback", () => {
+  assert.equal(
+    resolveSessionExecutionMode({ config: { executionMode: "api" } }),
+    "api",
+  );
+  assert.equal(
+    resolveSessionExecutionMode({ config: { executionMode: "dom" } }),
+    "dom",
+  );
+  assert.equal(resolveSessionExecutionMode({ config: {} }), "dom");
 });

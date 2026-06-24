@@ -301,6 +301,95 @@ test("browser bootstrap opens pending appointment and awaits appointment search"
   assert.deepEqual(result, { captured: true, status: 200 });
 });
 
+test("browser bootstrap opens reschedule surface before awaiting appointment search", async () => {
+  const events = [];
+  const calls = {
+    goto: [],
+    clickedReschedule: false,
+    clickedConfirm: false,
+  };
+
+  const makeWaitable = (handler = async () => {}) => ({
+    first() {
+      return this;
+    },
+    async waitFor(options) {
+      return handler(options);
+    },
+    async isVisible() {
+      return true;
+    },
+    locator() {
+      return confirmButton;
+    },
+  });
+
+  const confirmButton = makeWaitable();
+  confirmButton.click = async () => {
+    calls.clickedConfirm = true;
+    return true;
+  };
+
+  const rescheduleButton = makeWaitable();
+  const bookingBlock = makeWaitable();
+  const dialog = makeWaitable();
+  dialog.locator = () => confirmButton;
+
+  const page = {
+    async waitForResponse(predicate) {
+      const response = {
+        url: () =>
+          "https://www.usvisaappt.com/visaappointmentapi/appointments/search",
+        status: () => 200,
+      };
+      assert.equal(predicate(response), true);
+      return response;
+    },
+    async goto(url) {
+      calls.goto.push(url);
+    },
+    async waitForURL() {},
+    async reload() {},
+    async waitForTimeout() {},
+    once() {},
+    keyboard: { async press() {} },
+    locator(selector) {
+      if (selector.includes("my-app-button-popup-resch")) {
+        return rescheduleButton;
+      }
+      if (selector.includes("mat-dialog-container")) {
+        return dialog;
+      }
+      return bookingBlock;
+    },
+    async evaluate() {
+      calls.clickedReschedule = true;
+      return "RESCHEDULE";
+    },
+  };
+
+  const result = await bootstrapAppointmentSurface({
+    page,
+    appBaseUrl: "https://www.usvisaappt.com/visaapplicantui",
+    mode: "reschedule",
+    userDisplayName: "Route User",
+    userEmail: "route@example.com",
+    status: (code, message) => events.push({ code, message }),
+  });
+
+  assert.deepEqual(result, { captured: true, status: 200 });
+  assert.equal(
+    calls.goto[0],
+    "https://www.usvisaappt.com/visaapplicantui/home/appointment/myappointment",
+  );
+  assert.equal(calls.clickedReschedule, true);
+  assert.equal(calls.clickedConfirm, true);
+  assert.deepEqual(
+    events.map((event) => event.code),
+    ["MY_APPOINTMENTS", "RESCHEDULE_CLICK", "RESCHEDULE_CONFIRM", "BOOKING_WAIT"],
+  );
+});
+
 test("browser context bootstrap is throttled during unresolved retries", () => {
   const cache = { browserAttemptedAt: 1000 };
   assert.equal(shouldRunContextBootstrap(cache, 2000, 30_000), false);
