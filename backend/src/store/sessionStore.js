@@ -177,6 +177,7 @@ class SessionStore {
         pickupPoint: input.pickupPoint,
         headless: Boolean(input.headless),
         reschedule: Boolean(input.reschedule),
+        executionMode: input.executionMode === "api" ? "api" : "dom",
         // Optional appointment date preferences
         // - dateStart/dateEnd: YYYY-MM-DD (inclusive)
         // - daysFromNowMin/daysFromNowMax: inclusive window relative to today
@@ -228,6 +229,9 @@ class SessionStore {
     }
     if (Object.prototype.hasOwnProperty.call(patch, "reschedule")) {
       cfg.reschedule = Boolean(patch.reschedule);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "executionMode")) {
+      cfg.executionMode = patch.executionMode === "api" ? "api" : "dom";
     }
 
     if (Object.prototype.hasOwnProperty.call(patch, "dateStart")) {

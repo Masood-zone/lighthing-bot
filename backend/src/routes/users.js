@@ -6,6 +6,7 @@ function sanitizeUser(sessionLike) {
   if (!sessionLike) return sessionLike;
   const cfg = { ...(sessionLike.config || {}) };
   cfg.reschedule = Boolean(cfg.reschedule);
+  cfg.executionMode = cfg.executionMode === "api" ? "api" : "dom";
   const passwordSet = Boolean(cfg.passwordEnc || cfg.password);
   const proxySet = Boolean(cfg.proxyUrlEnc || cfg.proxyUrl);
   delete cfg.password;
@@ -131,6 +132,16 @@ function normalizeNullableString(value) {
   return trimmed || null;
 }
 
+function normalizeExecutionMode(value, fallback = "dom") {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value !== "string") return "__invalid__";
+
+  const normalized = value.trim().toLowerCase();
+  return normalized === "api" || normalized === "dom"
+    ? normalized
+    : "__invalid__";
+}
+
 function createUsersRouter({ store, pool, baseDir, profilesDir }) {
   const router = express.Router();
 
@@ -172,6 +183,7 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
       pickupPoint = "Accra",
       headless = false,
       reschedule,
+      executionMode,
       autoStart,
       proxyUrl,
     } = req.body || {};
@@ -193,6 +205,7 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
         : queryAutoStart || envAutoStart;
 
     const rescheduleBool = reschedule === undefined ? false : reschedule;
+    const executionModeEffective = normalizeExecutionMode(executionMode, "dom");
     const proxyUrlEffective = normalizeNullableString(proxyUrl);
 
     const {
@@ -218,6 +231,9 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
     }
     if (rescheduleBool !== undefined && typeof rescheduleBool !== "boolean") {
       return res.status(400).json({ error: "reschedule_invalid" });
+    }
+    if (executionModeEffective === "__invalid__") {
+      return res.status(400).json({ error: "executionMode_invalid" });
     }
     if (proxyUrlEffective === "__invalid__") {
       return res.status(400).json({ error: "proxyUrl_invalid" });
@@ -282,6 +298,7 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
         pickupPoint,
         headless: headlessEffective,
         reschedule: rescheduleBool,
+        executionMode: executionModeEffective,
         dateStart,
         dateEnd,
         daysFromNowMin,
@@ -334,6 +351,7 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
       pickupPoint,
       headless,
       reschedule,
+      executionMode,
       proxyUrl,
     } = req.body || {};
 
@@ -345,6 +363,10 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
       weeksFromNowMin,
       weeksFromNowMax,
     } = normalizeDatePrefs(req.body);
+    const executionModeEffective =
+      executionMode === undefined
+        ? undefined
+        : normalizeExecutionMode(executionMode);
     const proxyUrlEffective = normalizeNullableString(proxyUrl);
 
     if (loginUrl !== undefined && (typeof loginUrl !== "string" || !loginUrl)) {
@@ -370,6 +392,9 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
     }
     if (reschedule !== undefined && typeof reschedule !== "boolean") {
       return res.status(400).json({ error: "reschedule_invalid" });
+    }
+    if (executionModeEffective === "__invalid__") {
+      return res.status(400).json({ error: "executionMode_invalid" });
     }
     if (proxyUrlEffective === "__invalid__") {
       return res.status(400).json({ error: "proxyUrl_invalid" });
@@ -435,6 +460,9 @@ function createUsersRouter({ store, pool, baseDir, profilesDir }) {
         ...(pickupPoint !== undefined ? { pickupPoint } : null),
         ...(headless !== undefined ? { headless } : null),
         ...(reschedule !== undefined ? { reschedule } : null),
+        ...(executionModeEffective !== undefined
+          ? { executionMode: executionModeEffective }
+          : null),
         ...(dateStart !== undefined ? { dateStart } : null),
         ...(dateEnd !== undefined ? { dateEnd } : null),
         ...(daysFromNowMin !== undefined ? { daysFromNowMin } : null),

@@ -20,6 +20,10 @@ function readBoolEnv(name) {
   return v === "1" || String(v).toLowerCase() === "true";
 }
 
+function resolveSessionExecutionMode(session) {
+  return session?.config?.executionMode === "api" ? "api" : "dom";
+}
+
 function normalizeProxyUrl(raw) {
   const trimmed = String(raw || "").trim();
   if (!trimmed) return "";
@@ -718,8 +722,7 @@ class WorkerPool {
           : "0",
       VISA_PROFILE_DIR: profileDir,
       VISA_RESCHEDULE: session.config.reschedule ? "1" : "0",
-      VISA_EXECUTION_MODE:
-        process.env.VISA_EXECUTION_MODE || process.env.VISA_WORKER_MODE || "api",
+      VISA_EXECUTION_MODE: resolveSessionExecutionMode(session),
 
       // Optional appointment date preferences (all optional)
       VISA_DATE_START: session.config.dateStart || "",
@@ -1154,4 +1157,4 @@ class WorkerPool {
   }
 }
 
-module.exports = { WorkerPool };
+module.exports = { WorkerPool, resolveSessionExecutionMode };
