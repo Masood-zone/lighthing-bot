@@ -363,12 +363,19 @@ function extractTimeSlotFromText(text) {
   return slot;
 }
 
-function logWorkerToBackendConsole(sessionId, level, message) {
+function getWorkerConsoleLabel(sessionId, session) {
+  const displayName = safeOneLine(session?.config?.displayName);
+  if (!displayName) return sessionId;
+
+  return `${displayName} id:${sessionId}`;
+}
+
+function logWorkerToBackendConsole(sessionId, session, level, message) {
   const ts = nowIso();
   const msg = safeOneLine(message);
   if (!msg) return;
 
-  const prefix = `[${ts}] [worker:${sessionId}]`;
+  const prefix = `[${ts}] [worker:${getWorkerConsoleLabel(sessionId, session)}]`;
   if (level === "error" || level === "warn") {
     // eslint-disable-next-line no-console
     console[level](`${prefix} ${msg}`);
@@ -966,7 +973,7 @@ class WorkerPool {
       const line = buf.toString("utf8").trim();
       if (line) {
         this.store.appendLog(sessionId, "info", line);
-        logWorkerToBackendConsole(sessionId, "info", line);
+        logWorkerToBackendConsole(sessionId, session, "info", line);
       }
     });
 
@@ -974,7 +981,7 @@ class WorkerPool {
       const line = buf.toString("utf8").trim();
       if (line) {
         this.store.appendLog(sessionId, "error", line);
-        logWorkerToBackendConsole(sessionId, "error", line);
+        logWorkerToBackendConsole(sessionId, session, "error", line);
       }
     });
 
@@ -1003,6 +1010,7 @@ class WorkerPool {
 
         logWorkerToBackendConsole(
           sessionId,
+          session,
           "info",
           `STATUS ${safeOneLine(state)}${message ? ` - ${safeOneLine(message)}` : ""}`,
         );
@@ -1105,6 +1113,7 @@ class WorkerPool {
 
         logWorkerToBackendConsole(
           sessionId,
+          session,
           msg.level || "info",
           `LOG ${safeOneLine(msg.level || "info")} - ${safeOneLine(msg.message || "")}`,
         );
