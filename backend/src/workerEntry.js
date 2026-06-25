@@ -1,4 +1,16 @@
 // Entry point for forked worker sessions.
-// This isolates the booking browser automation from the API server process.
+// This isolates booking automation from the API server process.
 
-require("../main/index");
+const executionMode = String(
+  process.env.VISA_EXECUTION_MODE || process.env.VISA_WORKER_MODE || "api",
+)
+  .trim()
+  .toLowerCase();
+
+if (executionMode === "api") {
+  require("../main/api-worker");
+} else if (executionMode === "selenium") {
+  require("../main/visa-bot");
+} else {
+  require("../main/index");
+}

@@ -17,6 +17,7 @@ interface BasicUser {
   pickupPoint: string;
   headless: boolean;
   reschedule?: boolean;
+  executionMode?: "dom" | "api";
 }
 
 interface AuthenticatedUser {
@@ -48,6 +49,7 @@ interface BotConfig {
   pickupPoint: string;
   headless: boolean;
   reschedule?: boolean;
+  executionMode?: "dom" | "api";
   passwordSet: boolean;
 }
 

@@ -194,6 +194,7 @@ export default function UsersPage() {
                 <TableHead>Name</TableHead>
                 <TableHead>Timeline</TableHead>
                 <TableHead>Reschedule</TableHead>
+                <TableHead>Mode</TableHead>
                 {/* <TableHead>Status</TableHead> */}
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
@@ -212,6 +213,11 @@ export default function UsersPage() {
                     ) : (
                       <Badge variant="outline">No</Badge>
                     )}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline">
+                      {(u.config?.executionMode ?? "dom").toUpperCase()}
+                    </Badge>
                   </TableCell>
                   {/* <TableCell>{statusBadge(u.status)}</TableCell> */}
                   <TableCell className="text-right">
