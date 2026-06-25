@@ -13,6 +13,8 @@ export type BotLogEntry = {
   message: string;
 };
 
+export type ExecutionMode = "dom" | "api";
+
 export type BotUser = {
   id: string;
   createdAt: string;
@@ -31,6 +33,7 @@ export type BotUser = {
     pickupPoint: string;
     headless: boolean;
     reschedule?: boolean;
+    executionMode?: ExecutionMode;
     passwordSet: boolean;
 
     // Optional appointment date preferences
@@ -60,6 +63,7 @@ export type CreateUserInput = {
   pickupPoint?: string;
   headless?: boolean;
   reschedule?: boolean;
+  executionMode?: ExecutionMode;
 
   // Optional appointment date preferences
   dateStart?: string | null;

@@ -1,92 +1,115 @@
-# API inventory and appointment flow
+# Visa API endpoint and booking flow
 
-## Important implementation fact
+## Runtime selection
 
-The backend starts `main/index.js` through `src/workerEntry.js`. That worker uses
-Playwright to drive the US Visa Appointment web UI. `main/visa-bot.js` is the
-legacy Selenium worker and is not used by the current worker pool.
+`src/workerEntry.js` defaults to `VISA_EXECUTION_MODE=api` and loads
+`main/api-worker.js`. `main/index.js` is the Playwright DOM fallback and
+`main/visa-bot.js` is the Selenium fallback.
 
-Before the API tracing change, the worker did not directly call any protected
-US Visa Appointment API. Consequently, endpoint names copied from another
-deployment or guessed from UI labels would be unsafe. The current worker now
-records every same-origin XHR/fetch endpoint actually used by the platform as:
+## US Visa endpoints used by API mode
 
-```text
-[API_DISCOVERED] METHOD https://www.usvisaappt.com/path?key=<redacted> -> STATUS payload-shape={...}
+| Phase               | Method | Endpoint                                                               | Purpose                                                                                                                                                 |
+| ------------------- | ------ | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Identity            | GET    | `/visauserapi/portal/getuser`                                          | Validate the captured bearer session and obtain authenticated user/application fields.                                                                  |
+| Context fallback    | GET    | `/visaworkflowprocessor/workflow/getUserHistoryApplicantPaymentStatus` | Used only when DevTools traffic plus `getuser` cannot resolve the application/appointment. It is non-critical, single-attempt, and capped at 3 seconds. |
+| Appointment context | POST   | `/visaappointmentapi/appointments/search`                              | Capture or retrieve the complete `NEW`/`SCHEDULED` appointment record; also verify an ambiguous final mutation without replaying it.                    |
+| First availability  | POST   | `/visaadministrationapi/v1/modifyslot/getFirstAvailableMonth`          | Return the first month containing availability.                                                                                                         |
+| Date availability   | POST   | `/visaadministrationapi/v1/modifyslot/getSlotDates`                    | Return available dates inside the selected month/range.                                                                                                 |
+| Time availability   | POST   | `/visaadministrationapi/v1/modifyslot/getSlotTime`                     | Return slot records for a selected date.                                                                                                                |
+| Pending booking     | POST   | `/visaappointmentapi/appointments/schedule/group`                      | Schedule a new/pending appointment.                                                                                                                     |
+| Reschedule          | PUT    | `/visaappointmentapi/appointments/schedule/group`                      | Replace an existing scheduled appointment.                                                                                                              |
+
+The following endpoints are not called directly by the API worker because their
+output is not required for the active booking path:
+
+- `GET /visaadministrationapi/v1/postconfiguration/get/:postUserId`
+- `GET /visaworkflowprocessor/workflow/getTransformData/:applicationId`
+
+The network bridge first consumes browser-generated appointment-search
+responses. If none exist, it briefly opens the Pending Appointment or My
+Appointments surface and captures the platform's request. A direct read-only
+search by `applicationId` is the final fallback.
+
+## Request payloads
+
+Availability context shared by the three `modifyslot` calls:
+
+```json
+{
+  "postUserId": "483",
+  "applicantId": "<captured>",
+  "applicationId": "<captured>",
+  "locationType": "POST",
+  "visaClass": "<captured>",
+  "visaType": "<captured>"
+}
 ```
 
-Query values and credential/token/captcha payload fields are redacted. A 5xx is
-reported as `API_TRANSIENT_ERROR` and does not close the browser session. Set
-`VISA_API_TRACE=0` only when this discovery log is not wanted.
+`getSlotDates` adds `fromDate` and `toDate`. `getSlotTime` adds `fromDate`,
+`toDate`, and `slotDate`.
 
-## LightingBot backend APIs
+The final POST/PUT sends one appointment object:
 
-All protected endpoints below require `Authorization: Bearer <token>` except
-health and authentication setup/login.
+```json
+{
+  "applicantId": "<captured>",
+  "applicantUUID": "<captured-or-null>",
+  "applicationId": "<captured>",
+  "appointmentDt": "YYYY-MM-DDT00:00:00.000+00:00",
+  "appointmentId": "<captured>",
+  "appointmentLocationType": "POST",
+  "appointmentStatus": "SCHEDULED",
+  "appointmentTime": "10:00 AM",
+  "postUserId": "483",
+  "slotId": "<selected-slot>"
+}
+```
 
-| Method | Endpoint | Purpose / payload |
-| --- | --- | --- |
-| GET | `/health`, `/api/health` | Process health |
-| POST | `/api/auth/login` | Admin login: `{ email, password }` |
-| GET | `/api/auth/me` | Resolve current bearer token |
-| POST | `/api/auth/logout` | Revoke current bearer token |
-| POST | `/api/auth/create-admin` | Create an administrator |
-| GET | `/api/users` | List booking applicants |
-| GET | `/api/users/:id` | Read one applicant/session |
-| GET | `/api/users/:id/logs?tail=N` | Read worker/API trace logs |
-| POST | `/api/users` | Create applicant; fields include `loginUrl`, `email`, `password`, `displayName`, `pickupPoint`, `headless`, `reschedule`, date-window fields, `proxyUrl`, and optional `autoStart` |
-| PUT | `/api/users/:id` | Update the same applicant configuration while stopped |
-| DELETE | `/api/users/:id` | Stop and delete an applicant |
-| POST | `/api/sessions/:id/start` | Queue and spawn `main/index.js` |
-| POST | `/api/sessions/:id/stop` | Stop the worker with SIGTERM |
-| GET | `/api/queue` | Worker capacity and queued/running sessions |
-| GET | `/api/analytics` | Analytics snapshot |
-| GET | `/api/analytics/stream` | Live analytics SSE stream |
-| GET | `/api/notifications` | Read notification recipient |
-| PUT | `/api/notifications` | Save `{ email, name, active }` |
-| DELETE | `/api/notifications` | Clear notification recipient |
-| GET | `/api/administrators` | List notification administrators |
-| POST | `/api/administrators` | Add notification administrator |
-| DELETE | `/api/administrators/:id` | Remove notification administrator |
+## Fast-path sequence
 
-## End-to-end flow
+1. The user signs in and completes CAPTCHA in Playwright.
+2. Request/response listeners have already captured authorization, refresh/CSRF
+   headers, correlation key, cookies, and relevant response bodies.
+3. Dashboard detection is polled every 100 ms.
+4. `sessionStorage.authToken`, cookies, browser headers, and DevTools state are
+   promoted into the backend-only API session.
+5. `GET /visauserapi/portal/getuser` validates the session.
+6. Context is resolved from captured traffic and `getuser`; history is tried
+   once, then the relevant appointment surface is opened to capture the
+   platform-generated appointment search. Direct search is the final fallback.
+7. First month → dates → times are queried in order.
+8. The earliest date allowed by administrator preferences and earliest usable
+   time are selected.
+9. Pending uses POST; reschedule uses PUT.
+10. The worker emits `COMPLETED` only when the returned appointment matches the
+    submitted applicant, application, appointment, date, time, slot, and
+    `SCHEDULED` status.
 
-1. Frontend creates/updates the applicant with `POST /api/users` or
-   `PUT /api/users/:id`.
-2. Frontend starts the hunt with `POST /api/sessions/:id/start`.
-3. The pool decrypts the applicant password, builds worker environment values,
-   and forks `src/workerEntry.js` -> `main/index.js`.
-4. Playwright registers the platform API observer before opening the login URL.
-5. The user completes CAPTCHA/sign-in. Dashboard URL/identity is polled every
-   100 ms, so the booking hunt starts on the first authenticated UI tick.
-6. The worker opens Pending Appointment or Reschedule, selects the applicant and
-   pickup point, and scans allowed calendar months for green dates.
-7. The worker selects the earliest allowed date and earliest available time.
-8. It currently completes booking through the platform UI (`SELECT POST AND
-   PROCEED` or `BOOK POST APPOINTMENT`). There is no hard-coded platform PUT in
-   this repository yet.
-9. The trace from one real session supplies the authoritative availability,
-   slot, and final booking endpoint paths plus sanitized payload shapes. Only
-   after those are verified should the final call be promoted to a direct PUT;
-   it must reuse the browser context's cookies/anti-forgery headers and retain
-   the UI path as fallback.
+## Failure policy
 
-## Implementation TODOs
+- Read-only availability calls retry up to three times with 0.5s and 1.5s
+  backoff, then the outer hunt continues without closing Chrome.
+- A 500 from optional history is ignored after one short attempt.
+- Missing/incomplete context reports sanitized missing-field/source counts,
+  retains Chrome, and retries acquisition after 30 seconds without repeatedly
+  calling the same bootstrap APIs.
+- Missing token capture or failed reauthentication retries the browser-to-API
+  session bridge in the same Chrome session instead of reaching cleanup.
+- The final POST/PUT is never automatically replayed after an ambiguous failure.
+  One read-only appointment search verifies the outcome; otherwise the worker
+  pauses for manual verification.
+- 401 triggers reauthentication, 429 respects retry timing, and 403 remains a
+  blocked/manual-review state.
 
-- [x] Identify the production worker and current UI flow.
-- [x] Start hunting immediately after the first dashboard/authenticated signal.
-- [x] Keep the browser alive and retry when login/navigation encounters a
-  transient failure.
-- [x] Record platform XHR/fetch endpoints, methods, statuses, query-key names,
-  and sanitized payload shapes.
-- [x] Treat observed platform 5xx responses as non-fatal telemetry.
-- [ ] Run one authenticated Pending Appointment session and one Reschedule
-  session; copy the `API_DISCOVERED` records into a reviewed endpoint table.
-- [ ] Classify each observed endpoint as critical (auth, availability, slots,
-  booking) or optional (profile, content, telemetry).
-- [ ] Add bounded retry/backoff for critical GET availability/slot calls; never
-  retry the final booking mutation blindly because duplicate booking is risky.
-- [ ] Implement the verified final platform PUT with captured anti-forgery
-  headers/cookies and the exact observed payload, keeping UI automation as a
-  fallback and verifying success before marking the session complete.
+## LightingBot APIs that start and monitor this flow
 
+| Method | Endpoint                     | Purpose                                              |
+| ------ | ---------------------------- | ---------------------------------------------------- |
+| POST   | `/api/users`                 | Store encrypted applicant credentials/configuration. |
+| PUT    | `/api/users/:id`             | Update a stopped applicant configuration.            |
+| POST   | `/api/sessions/:id/start`    | Queue and fork the selected API worker.              |
+| POST   | `/api/sessions/:id/stop`     | Stop the worker explicitly.                          |
+| GET    | `/api/users/:id/logs?tail=N` | Read worker state/API retry logs.                    |
+| GET    | `/api/queue`                 | Read queued and active worker state.                 |
+| GET    | `/api/analytics`             | Read aggregate session state.                        |
+| GET    | `/api/analytics/stream`      | Stream aggregate state over SSE.                     |

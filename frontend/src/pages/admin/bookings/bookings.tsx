@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -24,16 +24,10 @@ import { getApiErrorMessage } from "@/services/api/errors";
 import { useSessionQueries } from "@/services/session/session-queries";
 import { useUsersQuery } from "@/services/users/use-users";
 import type { BotUser } from "@/services/users/users.types";
-
-type UiSessionStatus = "idle" | "queued" | "stopped";
-
-type UiSession = {
-  id: string;
-  user: BotUser;
-  status: UiSessionStatus;
-  lastEvent?: string;
-  lastResponse?: unknown;
-};
+import {
+  type UiSessionStatus,
+  useBookingSessionStore,
+} from "@/store/booking-session-store";
 
 function statusBadge(status: UiSessionStatus) {
   if (status === "queued") return <Badge>Started</Badge>;
@@ -52,8 +46,19 @@ function BookingsPage() {
   const { startSessionMutation, stopSessionMutation } = useSessionQueries();
 
   const users = usersQuery;
-  const [selectedUserId, setSelectedUserId] = useState<string | undefined>();
-  const [sessions, setSessions] = useState<UiSession[]>([]);
+  const selectedUserId = useBookingSessionStore(
+    (state) => state.selectedUserId,
+  );
+  const setSelectedUserId = useBookingSessionStore(
+    (state) => state.setSelectedUserId,
+  );
+  const sessions = useBookingSessionStore((state) => state.sessions);
+  const addOrUpdateSession = useBookingSessionStore(
+    (state) => state.addOrUpdateSession,
+  );
+  const syncActiveUsers = useBookingSessionStore(
+    (state) => state.syncActiveUsers,
+  );
   const [pendingById, setPendingById] = useState<
     Record<string, "starting" | "stopping" | undefined>
   >({});
@@ -63,28 +68,11 @@ function BookingsPage() {
     [users, selectedUserId],
   );
 
-  const addOrUpdateSession = (
-    sessionId: string,
-    updater: (prev: UiSession) => UiSession,
-    fallbackUser?: BotUser,
-  ) => {
-    setSessions((prev) => {
-      const existingIndex = prev.findIndex((s) => s.id === sessionId);
-      if (existingIndex >= 0) {
-        const next = [...prev];
-        next[existingIndex] = updater(next[existingIndex]);
-        return next;
-      }
-
-      if (!fallbackUser) return prev;
-      const created: UiSession = {
-        id: sessionId,
-        user: fallbackUser,
-        status: "idle",
-      };
-      return [...prev, updater(created)];
-    });
-  };
+  useEffect(() => {
+    if (users?.length) {
+      syncActiveUsers(users);
+    }
+  }, [syncActiveUsers, users]);
 
   const startOne = async (user: BotUser) => {
     const sessionId = user.id;

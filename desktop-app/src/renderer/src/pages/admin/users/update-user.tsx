@@ -61,7 +61,9 @@ export default function UpsertUserDialog(props: {
       email: "",
       password: "",
       displayName: "",
+      headless: false,
       reschedule: false,
+      executionMode: "dom",
 
       dateStart: null,
       dateEnd: null,
@@ -78,7 +80,9 @@ export default function UpsertUserDialog(props: {
       email: initial?.config?.email,
       displayName: initial?.config?.displayName,
       password: "",
+      headless: initial?.config?.headless ?? false,
       reschedule: initial?.config?.reschedule ?? false,
+      executionMode: initial?.config?.executionMode ?? "dom",
 
       dateStart: initial?.config?.dateStart ?? null,
       dateEnd: initial?.config?.dateEnd ?? null,
@@ -151,7 +155,6 @@ export default function UpsertUserDialog(props: {
               // These fields are intentionally not editable from the UI.
               delete (patch as Partial<CreateUserInput>).loginUrl;
               delete (patch as Partial<CreateUserInput>).pickupPoint;
-              delete (patch as Partial<CreateUserInput>).headless;
               await props.onEdit(patch);
             }
           })}
@@ -277,6 +280,82 @@ export default function UpsertUserDialog(props: {
                   <div className="text-sm text-muted-foreground">
                     When set to Yes, the bot navigates via “My Appointments →
                     Reschedule appointment”.
+                  </div>
+                </div>
+              </FieldContent>
+            </Field>
+
+            <Field>
+              <FieldLabel>
+                <FieldTitle>Execution Mode</FieldTitle>
+              </FieldLabel>
+              <FieldContent>
+                <div className="grid gap-2 md:grid-cols-[220px_1fr] md:items-center">
+                  <Controller
+                    control={form.control}
+                    name={"executionMode" as never}
+                    render={({ field }) => (
+                      <Select
+                        value={(field.value as string | undefined) ?? "dom"}
+                        onValueChange={(v) => field.onChange(v)}
+                        disabled={pending}
+                      >
+                        <SelectTrigger className="w-full cursor-pointer">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="dom" className="cursor-pointer">
+                            DOM
+                          </SelectItem>
+                          <SelectItem value="api" className="cursor-pointer">
+                            API
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    )}
+                  />
+                  <div className="text-sm text-muted-foreground">
+                    DOM uses the browser workflow. API uses authenticated
+                    backend requests after login.
+                  </div>
+                </div>
+              </FieldContent>
+            </Field>
+
+            <Field>
+              <FieldLabel>
+                <FieldTitle>Browser Mode</FieldTitle>
+              </FieldLabel>
+              <FieldContent>
+                <div className="grid gap-2 md:grid-cols-[220px_1fr] md:items-center">
+                  <Controller
+                    control={form.control}
+                    name={"headless" as never}
+                    render={({ field }) => (
+                      <Select
+                        value={Boolean(field.value) ? "headless" : "visible"}
+                        onValueChange={(v) =>
+                          field.onChange(v === "headless")
+                        }
+                        disabled={pending}
+                      >
+                        <SelectTrigger className="w-full cursor-pointer">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="visible" className="cursor-pointer">
+                            Visible
+                          </SelectItem>
+                          <SelectItem value="headless" className="cursor-pointer">
+                            Headless
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    )}
+                  />
+                  <div className="text-sm text-muted-foreground">
+                    Visible opens Chrome on screen. Headless runs the browser in
+                    the background.
                   </div>
                 </div>
               </FieldContent>

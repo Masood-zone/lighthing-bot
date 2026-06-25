@@ -8,6 +8,26 @@ The worker has one shared booking loop. The only major branch is the mode gate i
 
 After the booking UI is ready, both modes share the same calendar scan, slot hunt, applicant validation, pickup refresh, and final-action recovery logic in the main booking attempt flow.
 
+## API Engine Addition
+
+The repository now uses the API execution path by default:
+
+| Area | Implementation |
+| ---- | -------------- |
+| Feature flag | `VISA_EXECUTION_MODE=api`; `dom` remains available as explicit fallback |
+| Worker entry | `backend/src/workerEntry.js` chooses `backend/main/api-worker.js` for API mode |
+| API worker | `backend/main/api-worker.js` launches Playwright for login/CAPTCHA, captures session state, then books through API calls |
+| API helpers | `backend/src/services/visaApi/*` contains the client, session extractor, applicant resolver, date selector, slot selector, payload builder, verifier, errors, and redaction helpers |
+| Context acquisition | Captured appointment response -> complete bootstrap data -> browser-assisted appointment surface -> direct read-only search fallback |
+| Accra post | API mode uses post user id `483`; post-configuration lookup is not on the critical path |
+| Final pending request | `POST /visaappointmentapi/appointments/schedule/group` with one appointment object |
+| Final reschedule request | `PUT /visaappointmentapi/appointments/schedule/group` with one appointment object |
+| Completion rule | The final booking response must match selected appointment id, applicant id, application id, date, time, slot id, and `SCHEDULED` |
+| Ambiguous mutation | Verify once with appointment search, then pause for manual review; never replay POST/PUT automatically |
+| Locking | `WorkerPool` rejects another queued/running session for the same visa login host and booking email |
+
+API mode does not scan green calendar colors, click time slots, manipulate the applicant checkbox, or click final booking buttons. DOM mode remains available for fallback before any API final submission is attempted.
+
 ## Mode Comparison
 
 | Stage                 | PENDING                                                                     | RESCHEDULE                                                              | Implementation detail                                         |
