@@ -278,7 +278,7 @@ export default function UpsertUserDialog(props: {
                     )}
                   />
                   <div className="text-sm text-muted-foreground">
-                    When set to Yes, the bot navigates via “My Appointments →
+                    When set to Yes, the bot navigates to “My Appointments →
                     Reschedule appointment”.
                   </div>
                 </div>
@@ -305,11 +305,11 @@ export default function UpsertUserDialog(props: {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="dom" className="cursor-pointer">
-                            DOM
+                            Browser
                           </SelectItem>
-                          <SelectItem value="api" className="cursor-pointer">
+                          {/* <SelectItem value="api" className="cursor-pointer">
                             API
-                          </SelectItem>
+                          </SelectItem> */}
                         </SelectContent>
                       </Select>
                     )}
@@ -322,7 +322,7 @@ export default function UpsertUserDialog(props: {
               </FieldContent>
             </Field>
 
-            <Field>
+            {/* <Field>
               <FieldLabel>
                 <FieldTitle>Browser Mode</FieldTitle>
               </FieldLabel>
@@ -363,7 +363,7 @@ export default function UpsertUserDialog(props: {
                   </div>
                 </div>
               </FieldContent>
-            </Field>
+            </Field> */}
           </FieldGroup>
 
           {errorMessage ? (
