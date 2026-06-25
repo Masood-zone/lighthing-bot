@@ -111,21 +111,6 @@ const CONFIG = {
     0,
     Number(process.env.VISA_HOT_FINAL_BURST_DELAY_MS) || 10,
   ),
-  DOM_BLOCK_HEAVY_ASSETS:
-    process.env.VISA_DOM_BLOCK_HEAVY_ASSETS !== "0" &&
-    process.env.VISA_DOM_BLOCK_HEAVY_ASSETS !== "false",
-  DOM_PICKUP_READY_TIMEOUT_MS: Math.max(
-    500,
-    Number(process.env.VISA_DOM_PICKUP_READY_TIMEOUT_MS) || 2500,
-  ),
-  DOM_CALENDAR_REFRESH_TIMEOUT_MS: Math.max(
-    500,
-    Number(process.env.VISA_DOM_CALENDAR_REFRESH_TIMEOUT_MS) || 2500,
-  ),
-  DOM_FAST_POLL_MS: Math.max(
-    25,
-    Number(process.env.VISA_DOM_FAST_POLL_MS) || 50,
-  ),
   PROXY_URL: process.env.VISA_PROXY_URL || process.env.VISA_PROXY_SERVER || "",
   PROXY_BYPASS: process.env.VISA_PROXY_BYPASS || "",
   LOGIN_RETRY_MS: Math.max(
@@ -585,29 +570,6 @@ function attachPlatformApiObserver(context) {
   });
 }
 
-async function installDomResourceBlocking(context) {
-  if (!CONFIG.DOM_BLOCK_HEAVY_ASSETS) return;
-
-  await context
-    .route("**/*", async (route) => {
-      const request = route.request();
-      if (["image", "media", "font"].includes(request.resourceType())) {
-        await route.abort().catch(() => {});
-        return;
-      }
-      await route.continue().catch(() => {});
-    })
-    .then(() => {
-      status("BROWSER", "DOM mode blocking images, media, and fonts");
-    })
-    .catch((error) => {
-      status(
-        "BROWSER",
-        `DOM resource blocking unavailable: ${error?.message || String(error)}`,
-      );
-    });
-}
-
 function normalizeProxyUrl(raw) {
   const trimmed = String(raw || "").trim();
   if (!trimmed) return "";
@@ -683,7 +645,6 @@ async function launchBrowser() {
       CONFIG.PROFILE_DIR,
       launchOptions,
     );
-    await installDomResourceBlocking(context);
     const page = context.pages()[0] || (await context.newPage());
     attachPlatformApiObserver(context);
     page.setDefaultTimeout(15000);
@@ -697,7 +658,6 @@ async function launchBrowser() {
 
   const browser = await chromium.launch(launchOptions);
   const context = await browser.newContext({ viewport: null });
-  await installDomResourceBlocking(context);
   attachPlatformApiObserver(context);
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
@@ -1160,98 +1120,6 @@ async function waitForCalendarUiReady(page, timeoutMs = 45000) {
   return true;
 }
 
-async function waitForFastCalendarRefresh(
-  page,
-  { beforeHeader = "", timeoutMs = CONFIG.DOM_CALENDAR_REFRESH_TIMEOUT_MS } = {},
-) {
-  const startedAt = Date.now();
-  const bookingBlock = getBookingBlockLocator(page);
-  const deadline = startedAt + Math.max(100, timeoutMs);
-
-  await bookingBlock
-    .waitFor({ state: "visible", timeout: Math.min(timeoutMs, 1000) })
-    .catch(() => {});
-
-  while (Date.now() < deadline) {
-    const state = await page
-      .evaluate((previousHeader) => {
-        const isVisible = (element) => {
-          if (!element) return false;
-          const style = window.getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return (
-            style.display !== "none" &&
-            style.visibility !== "hidden" &&
-            rect.width > 0 &&
-            rect.height > 0
-          );
-        };
-
-        const isGreen = (element) => {
-          if (!element) return false;
-          const style = window.getComputedStyle(element);
-          return (
-            /20,\s*163,\s*139/.test(style.backgroundColor) ||
-            /#14a38b/i.test(style.backgroundColor)
-          );
-        };
-
-        const header = String(
-          document.querySelector(".mat-calendar-period-button")?.textContent ||
-            "",
-        )
-          .replace(/\s+/g, " ")
-          .trim();
-        const normalizedBefore = String(previousHeader || "")
-          .replace(/\s+/g, " ")
-          .trim();
-        const cells = Array.from(
-          document.querySelectorAll(
-            "button.mat-calendar-body-cell, td.mat-calendar-body-cell, .mat-calendar-body-cell-content",
-          ),
-        );
-        const hasCells = cells.some(isVisible);
-        const hasGreenDate = cells.some((cell) => isVisible(cell) && isGreen(cell));
-        const spinnerBlocking = Array.from(
-          document.querySelectorAll(
-            ".ngx-spinner-overlay, .loading, .loader, .spinner, .blockUI",
-          ),
-        ).some(isVisible);
-
-        return {
-          ready:
-            hasGreenDate ||
-            (header && normalizedBefore && header !== normalizedBefore) ||
-            hasCells ||
-            !spinnerBlocking,
-          header,
-          hasCells,
-          hasGreenDate,
-          spinnerBlocking,
-        };
-      }, beforeHeader)
-      .catch(() => ({ ready: false }));
-
-    if (state?.ready) {
-      await page.waitForTimeout(CONFIG.HOT_SCAN_SETTLE_MS).catch(() => {});
-      status(
-        "CALENDAR_TIMING",
-        `Calendar refresh ready in ${Date.now() - startedAt}ms`,
-      );
-      return true;
-    }
-
-    // eslint-disable-next-line no-await-in-loop
-    await page.waitForTimeout(CONFIG.DOM_FAST_POLL_MS).catch(() => {});
-  }
-
-  status(
-    "CALENDAR_TIMING",
-    `Calendar refresh wait capped at ${Date.now() - startedAt}ms`,
-  );
-  return false;
-}
-
 async function waitForCalendarMonthDatesReady(page, timeoutMs = 2000) {
   const bookingBlock = getBookingBlockLocator(page);
   try {
@@ -1276,7 +1144,6 @@ async function waitForCalendarMonthDatesReady(page, timeoutMs = 2000) {
 }
 
 async function waitForTimeSlotsUiReady(page, timeoutMs = 20000) {
-  const startedAt = Date.now();
   const bookingBlock = getBookingBlockLocator(page);
   try {
     await bookingBlock.waitFor({ state: "visible", timeout: timeoutMs });
@@ -1300,10 +1167,7 @@ async function waitForTimeSlotsUiReady(page, timeoutMs = 20000) {
       .first()
       .isVisible()
       .catch(() => false);
-    if (anyVisibleTime) {
-      status("SLOT_TIMING", `Slot text ready in ${Date.now() - startedAt}ms`);
-      return true;
-    }
+    if (anyVisibleTime) return true;
 
     // Some builds render the slot list outside `.ofc-book-slot-block`.
     // Fall back to a global check before timing out.
@@ -1313,13 +1177,7 @@ async function waitForTimeSlotsUiReady(page, timeoutMs = 20000) {
       .first()
       .isVisible()
       .catch(() => false);
-    if (anyVisibleTimeGlobal) {
-      status(
-        "SLOT_TIMING",
-        `Global slot text ready in ${Date.now() - startedAt}ms`,
-      );
-      return true;
-    }
+    if (anyVisibleTimeGlobal) return true;
 
     // eslint-disable-next-line no-await-in-loop
     const spinnerVisible = await spinner.isVisible().catch(() => false);
@@ -1332,20 +1190,13 @@ async function waitForTimeSlotsUiReady(page, timeoutMs = 20000) {
         .first()
         .isVisible()
         .catch(() => false);
-      if (clickableVisible) {
-        status(
-          "SLOT_TIMING",
-          `Clickable slot ready in ${Date.now() - startedAt}ms`,
-        );
-        return true;
-      }
+      if (clickableVisible) return true;
     }
 
     // eslint-disable-next-line no-await-in-loop
-    await page.waitForTimeout(CONFIG.DOM_FAST_POLL_MS);
+    await page.waitForTimeout(CONFIG.HOT_SCAN_SETTLE_MS);
   }
 
-  status("SLOT_TIMING", `Slot wait timed out after ${Date.now() - startedAt}ms`);
   return false;
 }
 
@@ -1478,28 +1329,32 @@ async function openAppointmentMode(page) {
 }
 
 async function selectPickupPoint(page) {
-  const startedAt = Date.now();
   status("PICKUP", `Selecting pickup ${CONFIG.PICKUP_POINT}`);
   // Critical: scope to the booking block so we do NOT hit the sidebar Language mat-select.
-  const pickupSelect = getPickupSelectLocator(page);
-  await pickupSelect.waitFor({
-    state: "visible",
-    timeout: CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
+  const bookingBlock = getBookingBlockLocator(page);
+  const selectClicked = await clickTextCandidate(page, CONFIG.PICKUP_POINT, {
+    timeoutMs: 5000,
+    selectors: ["mat-select"],
+    scope: ".ofc-book-slot-block",
   });
 
-  const result = await selectPickupOptionFast(
-    page,
-    pickupSelect,
-    CONFIG.PICKUP_POINT,
-  );
+  if (!selectClicked) {
+    await bookingBlock
+      .locator("mat-select[panelclass*='drop-down-panelcls'], mat-select")
+      .first()
+      .click({ timeout: 8000, force: true });
+  }
+  // mat-option renders in the global overlay; keep it global but ensure we click the right label.
+  const optionClicked = await clickTextCandidate(page, CONFIG.PICKUP_POINT, {
+    timeoutMs: 8000,
+    selectors: ["mat-option"],
+  });
 
-  if (!result?.clicked) {
+  if (!optionClicked) {
     throw new Error(
       `Pickup option ${CONFIG.PICKUP_POINT} not found or not clickable`,
     );
   }
-
-  status("PICKUP_TIMING", `Pickup selected in ${Date.now() - startedAt}ms`);
 }
 
 async function setApplicantCheckboxState(page, desiredChecked) {
@@ -1706,219 +1561,6 @@ function getBookingBlockLocator(page) {
       ".ofc-book-slot-block, .ofc-appoinment-sloat-block, .ofc-appointment-sloat-block, .ofc-appointment-slot-block",
     )
     .first();
-}
-
-function getPickupSelectLocator(page) {
-  return getBookingBlockLocator(page)
-    .locator("mat-select[panelclass*='drop-down-panelcls'], mat-select")
-    .first();
-}
-
-async function clickPickupSelectFast(page, pickupSelect) {
-  const clicked = await pickupSelect
-    .evaluate((element) => {
-      const dispatch = (eventName) => {
-        const event = eventName.startsWith("pointer")
-          ? new PointerEvent(eventName, {
-              bubbles: true,
-              cancelable: true,
-              composed: true,
-              pointerType: "mouse",
-              isPrimary: true,
-            })
-          : new MouseEvent(eventName, {
-              bubbles: true,
-              cancelable: true,
-              composed: true,
-            });
-        element.dispatchEvent(event);
-      };
-
-      element.scrollIntoView({ block: "center", inline: "nearest" });
-      ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach(
-        dispatch,
-      );
-      element.click?.();
-      return true;
-    })
-    .catch(() => false);
-
-  if (clicked) return true;
-  await pickupSelect.click({
-    timeout: CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
-    force: true,
-  });
-  return true;
-}
-
-async function armFastPickupOptionClick(
-  page,
-  targetText,
-  timeoutMs = CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
-) {
-  return page
-    .evaluate(
-      ({ target, timeout }) =>
-        new Promise((resolve) => {
-          const normalize = (value) =>
-            String(value || "")
-              .replace(/\s+/g, " ")
-              .trim()
-              .toUpperCase();
-
-          const wanted = normalize(target);
-          const deadline = Date.now() + Math.max(100, Number(timeout) || 2500);
-          let observer = null;
-          let interval = null;
-          let settled = false;
-
-          const cleanup = () => {
-            observer?.disconnect?.();
-            if (interval) window.clearInterval(interval);
-          };
-
-          const finish = (result) => {
-            if (settled) return;
-            settled = true;
-            cleanup();
-            resolve(result);
-          };
-
-          const isVisible = (element) => {
-            if (!element) return false;
-            const style = window.getComputedStyle(element);
-            const rect = element.getBoundingClientRect();
-            return (
-              style.display !== "none" &&
-              style.visibility !== "hidden" &&
-              rect.width > 0 &&
-              rect.height > 0
-            );
-          };
-
-          const fireClick = (element) => {
-            const rect = element.getBoundingClientRect();
-            const x = rect.left + rect.width / 2;
-            const y = rect.top + rect.height / 2;
-            const events = [
-              "pointerover",
-              "mouseover",
-              "pointerdown",
-              "mousedown",
-              "pointerup",
-              "mouseup",
-              "click",
-            ];
-
-            element.scrollIntoView({ block: "center", inline: "nearest" });
-            for (const eventName of events) {
-              const event = eventName.startsWith("pointer")
-                ? new PointerEvent(eventName, {
-                    bubbles: true,
-                    cancelable: true,
-                    composed: true,
-                    pointerType: "mouse",
-                    isPrimary: true,
-                    clientX: x,
-                    clientY: y,
-                  })
-                : new MouseEvent(eventName, {
-                    bubbles: true,
-                    cancelable: true,
-                    composed: true,
-                    clientX: x,
-                    clientY: y,
-                  });
-              element.dispatchEvent(event);
-            }
-            element.click?.();
-          };
-
-          const findOption = () => {
-            const options = Array.from(
-              document.querySelectorAll(
-                ".cdk-overlay-pane mat-option, mat-option",
-              ),
-            ).filter(isVisible);
-
-            return (
-              options.find((option) => normalize(option.textContent) === wanted) ||
-              options.find((option) =>
-                normalize(option.textContent).includes(wanted),
-              )
-            );
-          };
-
-          const tryClick = () => {
-            if (Date.now() > deadline) {
-              finish({ clicked: false, reason: "timeout" });
-              return;
-            }
-
-            const option = findOption();
-            if (!option) return;
-
-            try {
-              fireClick(option);
-              finish({
-                clicked: true,
-                text: String(option.textContent || "")
-                  .replace(/\s+/g, " ")
-                  .trim(),
-              });
-            } catch (error) {
-              finish({
-                clicked: false,
-                reason: error?.message || String(error),
-              });
-            }
-          };
-
-          observer = new MutationObserver(tryClick);
-          observer.observe(document.body, {
-            subtree: true,
-            childList: true,
-            attributes: true,
-            attributeFilter: ["class", "style", "aria-disabled", "disabled"],
-          });
-          interval = window.setInterval(tryClick, 25);
-          tryClick();
-        }),
-      { target: targetText, timeout: timeoutMs },
-    )
-    .catch((error) => ({
-      clicked: false,
-      reason: error?.message || String(error),
-    }));
-}
-
-async function selectPickupOptionFast(page, pickupSelect, optionText) {
-  const optionClick = armFastPickupOptionClick(
-    page,
-    optionText,
-    CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
-  );
-  await clickPickupSelectFast(page, pickupSelect);
-  const result = await optionClick;
-  if (result?.clicked) return result;
-
-  const fallback = page
-    .locator("mat-option")
-    .filter({ hasText: optionText })
-    .first();
-  const fallbackClicked = await fallback
-    .click({
-      timeout: CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
-      force: true,
-    })
-    .then(() => true)
-    .catch(() => false);
-
-  return {
-    clicked: fallbackClicked,
-    text: fallbackClicked ? optionText : null,
-    reason: fallbackClicked ? "fallback" : result?.reason || "not_found",
-  };
 }
 
 async function clickFirstGreenDate(page) {
@@ -2352,7 +1994,6 @@ async function huntGreenDate(
   page,
   { startTarget: explicitStartTarget = null } = {},
 ) {
-  const startedAt = Date.now();
   const allowTraversal = canTraverseCalendarMonths();
   const allowed = getAllowedDateRange();
   const maxMonthKey = allowed.max
@@ -2424,13 +2065,6 @@ async function huntGreenDate(
     ).catch(() => {});
   }
 
-  status(
-    "DATE_SCAN_TIMING",
-    `Date scan finished in ${Date.now() - startedAt}ms; selected=${
-      dateSelected || (outOfRangeFound ? "OUT_OF_RANGE" : "none")
-    }`,
-  );
-
   return {
     dateSelected: dateSelected || (outOfRangeFound ? "OUT_OF_RANGE" : null),
     monthAttempts,
@@ -2445,7 +2079,6 @@ async function huntGreenDate(
 }
 
 async function refreshPickupByToggle(page) {
-  const startedAt = Date.now();
   status(
     "PICKUP_REFRESH",
     `Refreshing pickup: Select -> ${CONFIG.PICKUP_POINT}`,
@@ -2463,24 +2096,18 @@ async function refreshPickupByToggle(page) {
   // Critical: scope to booking block; never interact with sidebar Language select.
   // The platform refreshes availability only when we re-open the pickup select,
   // choose the placeholder "Select", then choose Accra again.
-  const pickupSelect = getPickupSelectLocator(page);
-  await pickupSelect.waitFor({
-    state: "visible",
-    timeout: CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
-  });
+  const bookingBlock = page.locator(".ofc-book-slot-block").first();
+  const pickupSelect = bookingBlock
+    .locator("mat-select[panelclass*='drop-down-panelcls'], mat-select")
+    .first();
 
   // New refresh behavior: select the option immediately BEFORE the current
   // pickup point (e.g. before "Accra"), then select the pickup point again.
   // This forces the platform to refresh availability.
-  await clickPickupSelectFast(page, pickupSelect);
+  await pickupSelect.click({ timeout: 5000, force: true });
 
   const options = page.locator("mat-option");
-  await options
-    .first()
-    .waitFor({
-      state: "visible",
-      timeout: CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
-    });
+  await options.first().waitFor({ state: "visible", timeout: 5000 });
 
   const optionTexts = await options.allTextContents().catch(() => []);
   const normTarget = normalize(selectedName);
@@ -2512,81 +2139,40 @@ async function refreshPickupByToggle(page) {
       "PICKUP_REFRESH",
       `Refreshing pickup: ${priorLabel.trim()} -> ${selectedName}`,
     );
-    const priorClicked = await armFastPickupOptionClick(
-      page,
-      priorLabel,
-      CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
-    );
-    if (!priorClicked?.clicked) {
-      await options.nth(priorIndex).click({
-        timeout: CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
-        force: true,
-      });
-    }
-    await page.waitForTimeout(CONFIG.DOM_FAST_POLL_MS);
+    await options.nth(priorIndex).click({ timeout: 5000, force: true });
+    await page.waitForTimeout(200);
   } else if (selectIndex >= 0) {
     status("PICKUP_REFRESH", `Refreshing pickup: Select -> ${selectedName}`);
-    const selectClicked = await armFastPickupOptionClick(
-      page,
-      optionTexts[selectIndex],
-      CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
-    );
-    if (!selectClicked?.clicked) {
-      await options.nth(selectIndex).click({
-        timeout: CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
-        force: true,
-      });
-    }
-    await page.waitForTimeout(CONFIG.DOM_FAST_POLL_MS);
+    await options.nth(selectIndex).click({ timeout: 5000, force: true });
+    await page.waitForTimeout(200);
   } else {
     // Could not find either a prior option or the "Select" placeholder.
     // Bail out rather than repeatedly re-selecting the same pickup.
     return false;
   }
 
-  const targetClicked = await selectPickupOptionFast(
-    page,
-    pickupSelect,
-    selectedName,
-  );
-  if (!targetClicked?.clicked) {
-    const reopenedOptions = page.locator("mat-option");
-    await reopenedOptions
-      .first()
-      .waitFor({
-        state: "visible",
-        timeout: CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
-      });
+  await pickupSelect.click({ timeout: 5000, force: true });
 
-    // Always select by label text after reopening to avoid stale indices.
-    const exactTarget = reopenedOptions
-      .filter({
-        hasText: new RegExp(`^\\s*${escapeRegExp(selectedName)}\\s*$`, "i"),
-      })
-      .first();
-    if (await exactTarget.count().catch(() => 0)) {
-      await exactTarget.click({
-        timeout: CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
-        force: true,
-      });
-    } else {
-      const fuzzyTarget = reopenedOptions
-        .filter({ hasText: selectedName })
-        .first();
-      if (!(await fuzzyTarget.count().catch(() => 0))) return false;
-      await fuzzyTarget.click({
-        timeout: CONFIG.DOM_PICKUP_READY_TIMEOUT_MS,
-        force: true,
-      });
-    }
+  const reopenedOptions = page.locator("mat-option");
+  await reopenedOptions.first().waitFor({ state: "visible", timeout: 5000 });
+
+  // Always select by label text after reopening to avoid stale indices.
+  const exactTarget = reopenedOptions
+    .filter({
+      hasText: new RegExp(`^\\s*${escapeRegExp(selectedName)}\\s*$`, "i"),
+    })
+    .first();
+  if (await exactTarget.count().catch(() => 0)) {
+    await exactTarget.click({ timeout: 5000, force: true });
+    return true;
   }
+
+  const fuzzyTarget = reopenedOptions.filter({ hasText: selectedName }).first();
+  if (!(await fuzzyTarget.count().catch(() => 0))) return false;
+  await fuzzyTarget.click({ timeout: 5000, force: true });
 
   // Stamp refresh time only after we successfully toggled the pickup.
   lastPickupRefreshAt = Date.now();
-  status(
-    "PICKUP_REFRESH_TIMING",
-    `Pickup refreshed in ${lastPickupRefreshAt - startedAt}ms`,
-  );
   return true;
 }
 
@@ -2601,10 +2187,8 @@ async function refreshPickupAndRetryDateHunt(page, reason) {
         : "No usable date in the selected month; refreshing pickup and retrying",
   );
 
-  // If the calendar is still booting, use the short DOM gate first and leave
-  // the long readiness wait for initial page entry or recovery.
-  await waitForFastCalendarRefresh(page).catch(() => false);
-  const beforeHeader = await getCalendarHeaderText(page).catch(() => "");
+  // If the calendar is still booting, do not refresh pickup yet.
+  await waitForCalendarUiReady(page, 45000).catch(() => false);
 
   const refreshed = await refreshPickupByToggle(page).catch(() => false);
   if (!refreshed) {
@@ -2612,7 +2196,8 @@ async function refreshPickupAndRetryDateHunt(page, reason) {
   }
 
   // After changing pickup, wait for the calendar to refresh before scanning again.
-  await waitForFastCalendarRefresh(page, { beforeHeader }).catch(() => false);
+  await waitForCalendarUiReady(page, 45000).catch(() => false);
+  await page.waitForTimeout(180).catch(() => {});
 
   status(
     "PICKUP_REFRESH",
@@ -3363,10 +2948,6 @@ async function attemptBooking(page) {
   await page.waitForTimeout(120).catch(() => {});
 
   if (!CONFIG.RESCHEDULE) {
-    await ensureApplicantChecked(page, {
-      attempts: 1,
-      delayMs: CONFIG.DOM_FAST_POLL_MS,
-    }).catch(() => false);
     await selectPickupPoint(page);
   }
 
