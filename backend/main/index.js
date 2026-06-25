@@ -588,31 +588,10 @@ function attachPlatformApiObserver(context) {
 async function installDomResourceBlocking(context) {
   if (!CONFIG.DOM_BLOCK_HEAVY_ASSETS) return;
 
-  const isLoginOrCaptchaSurface = (url) => {
-    const value = String(url || "").toLowerCase();
-    return (
-      value.includes("/login") ||
-      value.includes("recaptcha") ||
-      value.includes("google.com") ||
-      value.includes("gstatic.com") ||
-      value.includes("googleusercontent.com")
-    );
-  };
-
   await context
     .route("**/*", async (route) => {
       const request = route.request();
       if (["image", "media", "font"].includes(request.resourceType())) {
-        const requestUrl = request.url();
-        const frameUrl = request.frame()?.url?.() || "";
-        if (
-          isLoginOrCaptchaSurface(requestUrl) ||
-          isLoginOrCaptchaSurface(frameUrl)
-        ) {
-          await route.continue().catch(() => {});
-          return;
-        }
-
         await route.abort().catch(() => {});
         return;
       }
