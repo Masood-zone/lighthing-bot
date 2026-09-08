@@ -18,6 +18,7 @@ const { NotificationStore } = require("./store/notificationStore");
 const { WorkerPool } = require("./queue/workerPool");
 const { AuthService } = require("./services/authService");
 const { EmailNotificationService } = require("./services/notifications");
+const { DesktopNotificationService } = require("./services/desktopNotifications");
 const { requireAuth } = require("./middleware/requireAuth");
 const { createRoutes } = require("./routes");
 
@@ -82,6 +83,7 @@ const notificationService = new EmailNotificationService({
   notificationStore,
   sessionStore: store,
 });
+const desktopNotificationService = new DesktopNotificationService();
 
 const ensure = userStore.ensureAdminFromEnv();
 if (ensure?.created && ensure?.via === "env") {
@@ -107,6 +109,7 @@ const pool = new WorkerPool({
   baseDir: BASE_DIR,
   profilesDir: PROFILES_DIR,
   notificationService,
+  desktopNotificationService,
 });
 
 const requireAuthMiddleware = requireAuth({ authService, userStore });

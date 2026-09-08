@@ -9,6 +9,7 @@
     "start": "node src/server.js",
     "dev": "node src/server.js",
     "start:worker": "node main/index.js",
+    "demo:desktop-notification": "node scripts/demo-desktop-notification.js",
     "test": "node --test tests/*.test.js"
   },
   "keywords": [],

@@ -45,12 +45,20 @@ function parseJsonMaybe(text) {
 }
 
 class VisaApiClient {
-  constructor({ context, page, auth, baseUrl = DEFAULT_BASE_URL, logger } = {}) {
+  constructor({
+    context,
+    page,
+    auth,
+    baseUrl = DEFAULT_BASE_URL,
+    logger,
+    finalMutationInPage = false,
+  } = {}) {
     this.context = context;
     this.page = page;
     this.auth = auth || {};
     this.baseUrl = String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.logger = logger || (() => {});
+    this.finalMutationInPage = Boolean(finalMutationInPage);
   }
 
   _headers({ json = true, referer } = {}) {
@@ -279,6 +287,96 @@ class VisaApiClient {
     throw new VisaAuthenticationExpiredError(`Request failed: ${op}`);
   }
 
+  async requestInPage(method, path, { data, operation, timeoutMs = 30_000 } = {}) {
+    if (!this.page) {
+      throw new VisaPlatformUnavailableError(
+        "Browser page is unavailable for the final booking request",
+        { operation },
+      );
+    }
+
+    const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
+    const op = operation || `${method} ${path}`;
+    const startedAt = Date.now();
+    const headers = this._headers({ json: data !== undefined });
+    delete headers.Referer;
+    delete headers["User-Agent"];
+
+    this.logger("debug", { operation: op, event: "request_start", attempt: 1 });
+
+    let result;
+    try {
+      result = await this.page.evaluate(
+        async ({ requestUrl, requestMethod, requestHeaders, requestData, requestTimeoutMs }) => {
+          const controller = new AbortController();
+          const timeout = window.setTimeout(() => controller.abort(), requestTimeoutMs);
+          try {
+            const response = await fetch(requestUrl, {
+              method: requestMethod,
+              headers: requestHeaders,
+              body: requestData === undefined ? undefined : JSON.stringify(requestData),
+              credentials: "include",
+              signal: controller.signal,
+            });
+            return {
+              status: response.status,
+              headers: Object.fromEntries(response.headers.entries()),
+              text: await response.text(),
+            };
+          } finally {
+            window.clearTimeout(timeout);
+          }
+        },
+        {
+          requestUrl: url,
+          requestMethod: method,
+          requestHeaders: headers,
+          requestData: data,
+          requestTimeoutMs: Math.max(250, Number(timeoutMs) || 30_000),
+        },
+      );
+    } catch (error) {
+      const message = String(error?.message || error);
+      this.logger("warn", {
+        operation: op,
+        event: "request_failed",
+        attempt: 1,
+        error: message,
+      });
+      throw new VisaPlatformUnavailableError(message, { operation: op });
+    }
+
+    const body = parseJsonMaybe(result.text);
+    const status = Number(result.status);
+    const retryAfterMs = parseRetryAfter(result.headers?.["retry-after"]);
+    this.logger("debug", {
+      operation: op,
+      event: "request_finish",
+      status,
+      durationMs: Date.now() - startedAt,
+      transport: "browser-page",
+    });
+
+    if (status < 200 || status >= 300) {
+      this.logger("warn", {
+        operation: op,
+        event: "request_failed",
+        status,
+        attempt: 1,
+        transport: "browser-page",
+      });
+      throw this._classifyHttpError({
+        status,
+        operation: op,
+        body,
+        retryAfterMs,
+      });
+    }
+
+    await this._updateAuthFromResponse({ headers: () => result.headers || {} });
+    return body;
+  }
+
   async getAuthenticatedUser() {
     return this.request("GET", "/visauserapi/portal/getuser", {
       operation: "getAuthenticatedUser",
@@ -390,6 +488,13 @@ class VisaApiClient {
   }
 
   async submitPendingAppointment(payload) {
+    if (this.finalMutationInPage) {
+      return this.requestInPage(
+        "POST",
+        "/visaappointmentapi/appointments/schedule/group",
+        { data: payload, operation: "submitPendingAppointment" },
+      );
+    }
     return this.request(
       "POST",
       "/visaappointmentapi/appointments/schedule/group",
@@ -402,6 +507,13 @@ class VisaApiClient {
   }
 
   async submitRescheduleAppointment(payload) {
+    if (this.finalMutationInPage) {
+      return this.requestInPage(
+        "PUT",
+        "/visaappointmentapi/appointments/schedule/group",
+        { data: payload, operation: "submitRescheduleAppointment" },
+      );
+    }
     return this.request(
       "PUT",
       "/visaappointmentapi/appointments/schedule/group",

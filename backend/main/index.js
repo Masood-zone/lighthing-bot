@@ -1,4 +1,5 @@
 const { chromium } = require("playwright");
+const { createPerfTracer } = require("../src/perfTrace");
 
 try {
   // eslint-disable-next-line global-require
@@ -123,6 +124,7 @@ const CONFIG = {
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const perfTrace = createPerfTracer({ mode: "dom" });
 
 function escapeRegExp(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1735,16 +1737,21 @@ async function scanVisibleMonthForGreenDate(page, maxScans = 2) {
   return { dateSelected: null, outOfRangeFound };
 }
 
-async function clickNextAvailableDateAfter(page, afterDateText) {
+async function clickNextAvailableDateAfter(
+  page,
+  afterDateText,
+  { sameVisibleMonthOnly = false } = {},
+) {
   const afterDay = Number(String(afterDateText || "").match(/\d{1,2}/)?.[0]);
   if (!Number.isFinite(afterDay)) return null;
 
   const allowed = getAllowedDateRange();
   const minIso = allowed.min ? allowed.min.toISOString().slice(0, 10) : null;
   const maxIso = allowed.max ? allowed.max.toISOString().slice(0, 10) : null;
+  const beforeHeader = await getCalendarHeaderText(page).catch(() => "");
 
   const outcome = await page.evaluate(
-    ({ afterDayArg, minIsoArg, maxIsoArg }) => {
+    ({ afterDayArg, minIsoArg, maxIsoArg, sameVisibleMonthOnlyArg }) => {
       const isGreen = (element) => {
         const style = window.getComputedStyle(element);
         return (
@@ -1825,7 +1832,7 @@ async function clickNextAvailableDateAfter(page, afterDateText) {
             .slice(0, 10);
           if (!isWithinIsoRange(iso)) return null;
 
-          return { cell, dayNum, text: dayText };
+          return { cell, dayNum, text: dayText, iso };
         })
         .filter(Boolean)
         .sort((left, right) => left.dayNum - right.dayNum)[0];
@@ -1838,6 +1845,8 @@ async function clickNextAvailableDateAfter(page, afterDateText) {
         return { mode: "CLICKED", text: later.text, iso: later.iso };
       }
 
+      if (sameVisibleMonthOnlyArg) return { mode: "NONE" };
+
       const nextButton = document.querySelector(
         "button.mat-calendar-next-button:not([disabled])",
       );
@@ -1848,7 +1857,12 @@ async function clickNextAvailableDateAfter(page, afterDateText) {
 
       return { mode: "NONE" };
     },
-    { afterDayArg: afterDay, minIsoArg: minIso, maxIsoArg: maxIso },
+    {
+      afterDayArg: afterDay,
+      minIsoArg: minIso,
+      maxIsoArg: maxIso,
+      sameVisibleMonthOnlyArg: sameVisibleMonthOnly,
+    },
   );
 
   if (!outcome || outcome.mode === "NONE") return null;
@@ -1862,7 +1876,6 @@ async function clickNextAvailableDateAfter(page, afterDateText) {
   }
 
   if (outcome.mode === "NEXT_MONTH") {
-    const beforeHeader = await getCalendarHeaderText(page).catch(() => "");
     await waitForCalendarMonthChange(
       page,
       beforeHeader,
@@ -1992,7 +2005,10 @@ async function navigateCalendarToMonth(page, target, maxSteps = 24) {
 
 async function huntGreenDate(
   page,
-  { startTarget: explicitStartTarget = null } = {},
+  {
+    startTarget: explicitStartTarget = null,
+    maxMonths = CONFIG.MAX_MONTHS,
+  } = {},
 ) {
   const allowTraversal = canTraverseCalendarMonths();
   const allowed = getAllowedDateRange();
@@ -2010,7 +2026,7 @@ async function huntGreenDate(
       }
     : null;
   const startTarget = clampMonthYearToAllowedRange(
-    explicitStartTarget || calendarResumeTarget || allowedMinTarget,
+    explicitStartTarget || allowedMinTarget || calendarResumeTarget,
     allowed,
   );
   await navigateCalendarToMonth(page, startTarget, 24).catch(() => false);
@@ -2023,7 +2039,7 @@ async function huntGreenDate(
   const maxScansPerMonth = 2;
   let currentHeader = null;
 
-  while (monthScans < CONFIG.MAX_MONTHS) {
+  while (monthScans < maxMonths) {
     monthScans += 1;
     currentHeader = await getCalendarMonthYear(page).catch(() => null);
     if (currentHeader && monthKey(currentHeader) > maxMonthKey) {
@@ -2033,7 +2049,11 @@ async function huntGreenDate(
     const {
       dateSelected: monthDateSelected,
       outOfRangeFound: monthOutOfRange,
-    } = await scanVisibleMonthForGreenDate(page, maxScansPerMonth);
+    } = await perfTrace.measure(
+      "visible_month_green_date_scan",
+      () => scanVisibleMonthForGreenDate(page, maxScansPerMonth),
+      { month: formatMonthYear(currentHeader) },
+    );
     if (monthOutOfRange) {
       outOfRangeFound = true;
     }
@@ -2054,20 +2074,27 @@ async function huntGreenDate(
     const moved = await clickNextCalendarMonth(page);
     if (!moved) break;
     monthAttempts += 1;
-    await waitForCalendarMonthChange(
-      page,
-      beforeHeader,
-      CONFIG.HOT_MONTH_CHANGE_WAIT_MS,
+    await perfTrace.measure(
+      "calendar_month_transition",
+      async () => {
+        await waitForCalendarMonthChange(
+          page,
+          beforeHeader,
+          CONFIG.HOT_MONTH_CHANGE_WAIT_MS,
+        );
+        await waitForCalendarMonthDatesReady(
+          page,
+          CONFIG.HOT_MONTH_READY_WAIT_MS,
+        ).catch(() => {});
+      },
+      { fromMonth: beforeHeader || "unknown" },
     );
-    await waitForCalendarMonthDatesReady(
-      page,
-      CONFIG.HOT_MONTH_READY_WAIT_MS,
-    ).catch(() => {});
   }
 
   return {
     dateSelected: dateSelected || (outOfRangeFound ? "OUT_OF_RANGE" : null),
     monthAttempts,
+    monthScans,
     outOfRangeFound,
     resumeTarget: clampMonthYearToAllowedRange(
       allowTraversal && currentHeader
@@ -2218,10 +2245,7 @@ async function refreshPickupAndRetryDateHunt(page, reason) {
   return { refreshed: true, dateSelected, monthAttempts };
 }
 
-async function clickEarliestTimeSlot(page, timeoutMs = 4000) {
-  // Do a short wait for slots to populate so we don't prematurely return "No time slot".
-  await waitForTimeSlotsUiReady(page, timeoutMs).catch(() => false);
-
+async function clickEarliestTimeSlot(page, _timeoutMs = 4000) {
   const bookingBlock = getBookingBlockLocator(page);
   let result = await bookingBlock.evaluate((root) => {
     const isVisible = (element) => {
@@ -2933,7 +2957,7 @@ async function waitForFinalActionOutcome(
   return null;
 }
 
-async function attemptBooking(page) {
+async function attemptBookingInner(page) {
   const allowTraversal = canTraverseCalendarMonths();
   await openAppointmentMode(page);
 
@@ -2945,14 +2969,18 @@ async function attemptBooking(page) {
     return "idle";
   }
 
+  const finishCalendarReady = perfTrace.start("calendar_ready_to_scan");
   await page.waitForTimeout(120).catch(() => {});
 
   if (!CONFIG.RESCHEDULE) {
     await selectPickupPoint(page);
   }
+  finishCalendarReady({ outcome: "scan_started" });
 
-  let { dateSelected, monthAttempts, resumeTarget } = await huntGreenDate(page);
+  let { dateSelected, monthAttempts, monthScans, resumeTarget } =
+    await huntGreenDate(page);
   calendarResumeTarget = allowTraversal ? resumeTarget : null;
+  let remainingMonthBudget = Math.max(0, CONFIG.MAX_MONTHS - monthScans);
 
   if (monthAttempts > 0) {
     status(
@@ -3000,14 +3028,18 @@ async function attemptBooking(page) {
 
   let activeDate = dateSelected;
   let slotSelected = false;
-  const slotRetryLimit = CONFIG.HOT_SLOT_RETRY_LIMIT;
+  let pickupRefreshedAfterNoSlot = false;
 
-  for (let retry = 0; retry < slotRetryLimit; retry += 1) {
+  while (!slotSelected) {
     status("SLOT", `Waiting for time slots to load for date ${activeDate}`);
-    const slotsReady = await waitForTimeSlotsUiReady(
-      page,
-      CONFIG.HOT_SLOT_READY_TIMEOUT_MS,
-    ).catch(() => false);
+    const slotsReady = await perfTrace.measure(
+      "date_click_to_slot_ui_ready",
+      () => waitForTimeSlotsUiReady(
+        page,
+        CONFIG.HOT_SLOT_READY_TIMEOUT_MS,
+      ).catch(() => false),
+      { selectedDate: activeDate },
+    );
     if (!slotsReady) {
       status(
         "SLOT",
@@ -3015,9 +3047,13 @@ async function attemptBooking(page) {
       );
     } else {
       // Keep the time selection fast: choose the earliest visible slot only.
-      slotSelected = await clickEarliestTimeSlot(
-        page,
-        CONFIG.HOT_SLOT_CLICK_TIMEOUT_MS,
+      slotSelected = await perfTrace.measure(
+        "slot_discovery_click",
+        () => clickEarliestTimeSlot(
+          page,
+          CONFIG.HOT_SLOT_CLICK_TIMEOUT_MS,
+        ),
+        { selectedDate: activeDate },
       );
       if (slotSelected) {
         break;
@@ -3028,33 +3064,60 @@ async function attemptBooking(page) {
         `No time slot found for date ${activeDate}; moving to next date`,
       );
 
-      if (!allowTraversal) {
-        const refreshed = await refreshPickupAndRetryDateHunt(page, "NO_SLOT");
-        if (!refreshed.refreshed) {
-          status(
-            "SLOT",
-            "Pickup refresh failed while rescanning the selected month",
-          );
-          return "slot";
-        }
+    }
 
-        if (!refreshed.dateSelected) {
-          status(
-            "DATE",
-            "No usable date found in the selected month after pickup refresh",
-          );
-          return "idle";
-        }
+    const nextSameMonthDate = await clickNextAvailableDateAfter(
+      page,
+      activeDate,
+      { sameVisibleMonthOnly: true },
+    ).catch(() => null);
+    if (nextSameMonthDate) {
+      activeDate = nextSameMonthDate;
+      continue;
+    }
 
-        activeDate = refreshed.dateSelected;
-        continue;
+    if (!allowTraversal) {
+      if (pickupRefreshedAfterNoSlot) {
+        status("DATE", "No later green date found after pickup refresh");
+        return "idle";
       }
+      const refreshed = await refreshPickupAndRetryDateHunt(page, "NO_SLOT");
+      if (!refreshed.refreshed) {
+        status(
+          "SLOT",
+          "Pickup refresh failed while rescanning the selected month",
+        );
+        return "slot";
+      }
+
+      if (!refreshed.dateSelected) {
+        status(
+          "DATE",
+          "No usable date found in the selected month after pickup refresh",
+        );
+        return "idle";
+      }
+
+      activeDate = refreshed.dateSelected;
+      pickupRefreshedAfterNoSlot = true;
+      continue;
+    }
+
+    if (remainingMonthBudget <= 0) {
+      status("DATE", "No later month available within this hunt cycle");
+      return "idle";
     }
 
     const nextMonthTarget = await getNextTraversalMonthTarget(page);
 
     if (!nextMonthTarget) {
       status("DATE", "No later month available to continue hunting");
+      return "idle";
+    }
+
+    const currentMonth = await getCalendarMonthYear(page).catch(() => null);
+    if (currentMonth && monthKey(nextMonthTarget) <= monthKey(currentMonth)) {
+      status("DATE", "Reached the final allowed month for this hunt cycle");
       return "idle";
     }
 
@@ -3066,13 +3129,19 @@ async function attemptBooking(page) {
 
     const nextMonthScan = await huntGreenDate(page, {
       startTarget: nextMonthTarget,
+      maxMonths: remainingMonthBudget,
     }).catch(() => ({
       dateSelected: null,
       monthAttempts: 0,
+      monthScans: 0,
       resumeTarget: nextMonthTarget,
     }));
 
     calendarResumeTarget = nextMonthScan.resumeTarget;
+    remainingMonthBudget = Math.max(
+      0,
+      remainingMonthBudget - nextMonthScan.monthScans,
+    );
 
     if (!nextMonthScan.dateSelected) {
       status("DATE", "No usable date found in later months");
@@ -3111,6 +3180,13 @@ async function attemptBooking(page) {
 
   calendarResumeTarget = null;
   return "done";
+}
+
+async function attemptBooking(page) {
+  return perfTrace.measure(
+    "complete_date_hunt_cycle",
+    () => attemptBookingInner(page),
+  );
 }
 
 async function main() {

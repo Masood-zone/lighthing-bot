@@ -175,6 +175,41 @@ function currentMonthRange(now = new Date()) {
   };
 }
 
+function buildMonthScanPlan({ firstAvailableDate, minDate, maxDate } = {}) {
+  const firstDate = parseIsoDateOnly(firstAvailableDate);
+  const minimum = parseIsoDateOnly(minDate);
+  const maximum = parseIsoDateOnly(maxDate);
+  const platformMonth = monthRangeFor(firstDate);
+  if (!platformMonth) return [];
+
+  const startMonthDate =
+    minimum && minimum > platformMonth.toDate
+      ? minimum
+      : platformMonth.fromDate;
+  const startMonth = monthRangeFor(startMonthDate);
+  if (!startMonth || (maximum && startMonth.fromDate > maximum)) return [];
+
+  const effectiveMaximum = maximum || startMonth.toDate;
+  const plan = [];
+  let cursor = toDateUtc(startMonth.fromDate);
+
+  while (cursor) {
+    const monthStart = formatIsoDateOnly(cursor);
+    if (monthStart > effectiveMaximum) break;
+    const monthRange = monthRangeFor(monthStart);
+    const fromDate = laterDate(monthRange.fromDate, minimum);
+    const toDate = earlierDate(monthRange.toDate, effectiveMaximum);
+    if (fromDate && toDate && fromDate <= toDate) {
+      plan.push({ fromDate, toDate });
+    }
+    cursor = new Date(
+      Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1),
+    );
+  }
+
+  return plan;
+}
+
 function laterDate(a, b) {
   if (!a) return b || null;
   if (!b) return a || null;
@@ -201,6 +236,7 @@ module.exports = {
   selectAvailableDate,
   monthRangeFor,
   currentMonthRange,
+  buildMonthScanPlan,
   laterDate,
   earlierDate,
   platformDateTime,

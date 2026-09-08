@@ -421,7 +421,7 @@ function logSessionLifecycle(sessionId, session, action, detail = "") {
 
 class WorkerPool {
   /**
-   * @param {{ store: import('../store/sessionStore').SessionStore, maxConcurrent: number, workerEntry: string, baseDir: string, profilesDir?: string, notificationService?: any }} opts
+   * @param {{ store: import('../store/sessionStore').SessionStore, maxConcurrent: number, workerEntry: string, baseDir: string, profilesDir?: string, notificationService?: any, desktopNotificationService?: any }} opts
    */
   constructor({
     store,
@@ -430,6 +430,7 @@ class WorkerPool {
     baseDir,
     profilesDir,
     notificationService,
+    desktopNotificationService,
   }) {
     this.store = store;
     // Allow disabling worker execution entirely by setting MAX_CONCURRENT=0.
@@ -467,12 +468,18 @@ class WorkerPool {
     this.failedProxyUrls = new Set();
 
     this.notificationService = notificationService || null;
+    this.desktopNotificationService = desktopNotificationService || null;
+    this.desktopNotificationsEnabled =
+      readBoolEnv("VISA_ENABLE_DESKTOP_NOTIFICATIONS") === true;
 
     /** @type {Map<string, {dateKey?: string, timeSlot?: string}>} */
     this.bookingContext = new Map();
 
     /** @type {Set<string>} */
     this.notifiedSuccess = new Set();
+
+    /** @type {Set<string>} */
+    this.notifiedDesktopSuccess = new Set();
 
     /** @type {Set<string>} */
     this.notifiedClick = new Set();
@@ -1020,6 +1027,35 @@ class WorkerPool {
           this.store.setStatus(sessionId, "BLOCKED", message || "Blocked");
         } else if (state === "COMPLETED") {
           this.store.setStatus(sessionId, "COMPLETED", message || "Completed");
+
+          if (
+            this.desktopNotificationsEnabled &&
+            !this.notifiedDesktopSuccess.has(sessionId)
+          ) {
+            this.notifiedDesktopSuccess.add(sessionId);
+            const desktop = this.desktopNotificationService;
+            if (desktop && typeof desktop.notifyBookingSuccess === "function") {
+              const ctx = this.bookingContext.get(sessionId) || {};
+              desktop
+                .notifyBookingSuccess({ session, booking: { ...ctx } })
+                .then((result) => {
+                  this.store.appendLog(
+                    sessionId,
+                    result?.sent ? "info" : "warn",
+                    result?.sent
+                      ? "Desktop booking notification sent"
+                      : `Desktop booking notification not sent: ${safeOneLine(result?.reason || "unknown error")}`,
+                  );
+                })
+                .catch((error) => {
+                  this.store.appendLog(
+                    sessionId,
+                    "warn",
+                    `Desktop booking notification failed: ${safeOneLine(error?.message || error)}`,
+                  );
+                });
+            }
+          }
 
           // Notifications are paused for now; keep the completion state but do
           // not send success emails until the feature is re-enabled.

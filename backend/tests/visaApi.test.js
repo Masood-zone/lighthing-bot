@@ -3,6 +3,8 @@ const assert = require("node:assert/strict");
 
 const {
   computeDateWindow,
+  monthRangeFor,
+  buildMonthScanPlan,
   currentMonthRange,
   selectAvailableDate,
   selectEarliestUsableSlot,
@@ -15,6 +17,9 @@ const {
   decodeJwtExp,
   VisaApiClient,
   VisaApplicationNotFoundError,
+  VisaNoDatesAvailableError,
+  VisaNoSlotsAvailableError,
+  VisaBookingVerificationError,
   bootstrapAppointmentSurface,
   shouldRunContextBootstrap,
 } = require("../src/services/visaApi");
@@ -87,6 +92,241 @@ test("slot-time lookup range uses the current month window", () => {
     fromDate: "2026-06-14",
     toDate: "2026-06-30",
   });
+});
+
+test("exact-date next-available fallback retains chronological selection", () => {
+  const result = selectAvailableDate({
+    availableDates: ["2027-06-20", "2027-06-05", "2027-06-12"],
+    exactDate: "2027-06-10",
+    fallbackStrategy: "NEXT_AVAILABLE",
+  });
+
+  assert.equal(result.selectedDate, "2027-06-12");
+});
+
+test("reschedule selection filters the current appointment unless allowed", () => {
+  const input = {
+    availableDates: ["2027-06-10", "2027-06-12"],
+    currentAppointmentDate: "2027-06-10",
+    mode: "reschedule",
+  };
+
+  assert.equal(selectAvailableDate(input).selectedDate, "2027-06-12");
+  assert.equal(
+    selectAvailableDate({ ...input, allowSameDateReschedule: true }).selectedDate,
+    "2027-06-10",
+  );
+});
+
+test("slot-time lookup range follows a future selected appointment month", () => {
+  const systemNow = new Date("2026-09-18T12:00:00.000Z");
+  assert.deepEqual(currentMonthRange(systemNow), {
+    fromDate: "2026-09-18",
+    toDate: "2026-09-30",
+  });
+  assert.deepEqual(monthRangeFor("2026-11-14"), {
+    fromDate: "2026-11-01",
+    toDate: "2026-11-30",
+  });
+});
+
+test("month scan plan is chronological and clipped to the configured window", () => {
+  assert.deepEqual(
+    buildMonthScanPlan({
+      firstAvailableDate: "2026-10-12",
+      minDate: "2026-10-15",
+      maxDate: "2026-12-20",
+    }),
+    [
+      { fromDate: "2026-10-15", toDate: "2026-10-31" },
+      { fromDate: "2026-11-01", toDate: "2026-11-30" },
+      { fromDate: "2026-12-01", toDate: "2026-12-20" },
+    ],
+  );
+});
+
+test("first available date is treated as a month marker", () => {
+  assert.deepEqual(
+    buildMonthScanPlan({ firstAvailableDate: "2026-10-15" }),
+    [{ fromDate: "2026-10-01", toDate: "2026-10-31" }],
+  );
+  assert.deepEqual(
+    buildMonthScanPlan({
+      firstAvailableDate: "2026-10-15",
+      minDate: "2026-10-20",
+      maxDate: "2026-10-25",
+    }),
+    [{ fromDate: "2026-10-20", toDate: "2026-10-25" }],
+  );
+});
+
+test("API hunt scans months and dates sequentially until a later month succeeds", async () => {
+  const calls = [];
+  const { findDateAndSlot } = require("../main/api-worker");
+  const client = {
+    async getFirstAvailableMonth() {
+      calls.push("first");
+      return { present: true, date: "2026-10-01" };
+    },
+    async getAvailableDates(_context, range) {
+      calls.push(`dates:${range.fromDate}`);
+      if (range.fromDate.startsWith("2026-10")) return [];
+      if (range.fromDate.startsWith("2026-11")) {
+        return ["2026-11-08T00:00:00Z", "2026-11-04T00:00:00Z"];
+      }
+      return ["2026-12-02T00:00:00Z"];
+    },
+    async getAvailableTimeSlots(_context, { slotDate, fromDate, toDate }) {
+      calls.push(`slots:${slotDate}:${fromDate}:${toDate}`);
+      if (slotDate !== "2026-12-02") return [];
+      return [{
+        slotId: "slot-1",
+        slotStatus: "UNBOOKED",
+        status: "A",
+        startTime: "2026-12-02T09:30:00.000Z",
+      }];
+    },
+  };
+  const result = await findDateAndSlot({
+    client,
+    context: { availability: {}, appointment: {} },
+    dateWindow: {
+      minDate: "2026-10-01",
+      maxDate: "2026-12-31",
+      source: "absolute",
+    },
+  });
+
+  assert.equal(result.selectedDate, "2026-12-02");
+  assert.deepEqual(calls, [
+    "first",
+    "dates:2026-10-01",
+    "dates:2026-11-01",
+    "slots:2026-11-04:2026-11-01:2026-11-30",
+    "slots:2026-11-08:2026-11-01:2026-11-30",
+    "dates:2026-12-01",
+    "slots:2026-12-02:2026-12-01:2026-12-31",
+  ]);
+});
+
+test("API hunt distinguishes no acceptable dates from dates without slots", async () => {
+  const { findDateAndSlot } = require("../main/api-worker");
+  const context = { availability: {}, appointment: {} };
+  const dateWindow = {
+    minDate: "2026-10-01",
+    maxDate: "2026-10-31",
+    source: "absolute",
+  };
+  const baseClient = {
+    async getFirstAvailableMonth() {
+      return { present: true, date: "2026-10-01" };
+    },
+    async getAvailableTimeSlots() {
+      return [];
+    },
+  };
+
+  await assert.rejects(
+    findDateAndSlot({
+      client: { ...baseClient, async getAvailableDates() { return []; } },
+      context,
+      dateWindow,
+    }),
+    VisaNoDatesAvailableError,
+  );
+  await assert.rejects(
+    findDateAndSlot({
+      client: {
+        ...baseClient,
+        async getAvailableDates() { return ["2026-10-04"]; },
+      },
+      context,
+      dateWindow,
+    }),
+    VisaNoSlotsAvailableError,
+  );
+});
+
+test("API hunt ignores dates returned outside the active month range", async () => {
+  const calls = [];
+  const { findDateAndSlot } = require("../main/api-worker");
+  const result = await findDateAndSlot({
+    client: {
+      async getFirstAvailableMonth() {
+        return { present: true, date: "2026-10-01" };
+      },
+      async getAvailableDates(_context, range) {
+        calls.push(`dates:${range.fromDate}`);
+        return range.fromDate.startsWith("2026-10")
+          ? ["2026-12-01"]
+          : ["2026-11-03"];
+      },
+      async getAvailableTimeSlots(_context, { slotDate }) {
+        calls.push(`slots:${slotDate}`);
+        return [{
+          slotId: "slot-3",
+          slotStatus: "UNBOOKED",
+          status: "A",
+          startTime: `${slotDate}T08:00:00.000Z`,
+        }];
+      },
+    },
+    context: { availability: {}, appointment: {} },
+    dateWindow: {
+      minDate: "2026-10-01",
+      maxDate: "2026-11-30",
+      source: "absolute",
+    },
+  });
+
+  assert.equal(result.selectedDate, "2026-11-03");
+  assert.deepEqual(calls, [
+    "dates:2026-10-01",
+    "dates:2026-11-01",
+    "slots:2026-11-03",
+  ]);
+});
+
+test("ambiguous final mutation is attempted once before read-only verification", async () => {
+  const { submitAndVerify } = require("../main/api-worker");
+  let mutationCalls = 0;
+  let verificationCalls = 0;
+  const selectedSlot = {
+    slotId: "slot-1",
+    slotStatus: "UNBOOKED",
+    status: "A",
+    startTime: "2027-06-10T10:00:00.000Z",
+  };
+
+  await assert.rejects(
+    submitAndVerify({
+      client: {
+        async submitPendingAppointment() {
+          mutationCalls += 1;
+          throw new Error("network outcome unknown");
+        },
+        async searchCurrentAppointments() {
+          verificationCalls += 1;
+          return [];
+        },
+      },
+      context: {
+        appointment: {
+          applicantId: "applicant-1",
+          applicationId: "application-1",
+          appointmentId: "appointment-1",
+          appointmentLocationType: "POST",
+          postUserId: "483",
+        },
+      },
+      selectedDate: "2027-06-10",
+      selectedSlot,
+    }),
+    VisaBookingVerificationError,
+  );
+
+  assert.equal(mutationCalls, 1);
+  assert.equal(verificationCalls, 1);
 });
 
 test("slot selector skips unusable slots and chooses earliest usable slot", () => {
