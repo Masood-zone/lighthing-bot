@@ -16,6 +16,7 @@ const {
   VisaApiUnauthorizedError,
   VisaApiForbiddenError,
   VisaApiRateLimitedError,
+  VisaSlotConflictError,
   VisaPlatformUnavailableError,
   VisaNoDatesAvailableError,
   VisaNoSlotsAvailableError,
@@ -671,6 +672,9 @@ async function submitAndVerify({ client, context, selectedDate, selectedSlot }) 
       ? await client.submitRescheduleAppointment(payload)
       : await client.submitPendingAppointment(payload);
   } catch (error) {
+    if (error instanceof VisaSlotConflictError) {
+      throw error;
+    }
     finalError = error;
     status(
       "BOOKING_OUTCOME_UNKNOWN",
@@ -832,6 +836,15 @@ async function main() {
         if (error instanceof VisaNoSlotsAvailableError) {
           status("NO_SLOTS_AVAILABLE", error.message);
           status("WAITING_NEXT_SCAN", "Waiting before refreshing availability");
+          await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
+          continue;
+        }
+
+        if (error instanceof VisaSlotConflictError) {
+          status(
+            "SLOT_CONFLICT",
+            "Selected slot was rejected; refreshing availability before another selection",
+          );
           await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
           continue;
         }

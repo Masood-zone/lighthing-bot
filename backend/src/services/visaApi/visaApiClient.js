@@ -3,6 +3,7 @@ const {
   VisaApiUnauthorizedError,
   VisaApiForbiddenError,
   VisaApiRateLimitedError,
+  VisaSlotConflictError,
   VisaApiContractError,
   VisaPlatformUnavailableError,
   VisaBookingRejectedError,
@@ -43,6 +44,21 @@ function parseJsonMaybe(text) {
   } catch {
     return text;
   }
+}
+
+function providerDiagnostics(body) {
+  const value = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  const responseMessage = String(value.responseMessage || "");
+  return {
+    providerStatus: value.status ?? null,
+    providerHttpStatus: value.httpStatus ?? null,
+    providerRequestUrl: value.requestURL ?? null,
+    providerMessageCategory: /appointment booking failed/i.test(responseMessage)
+      ? "appointment_booking_failed"
+      : responseMessage
+        ? "provider_message_present"
+        : "none",
+  };
 }
 
 class VisaApiClient {
@@ -156,6 +172,13 @@ class VisaApiClient {
     }
     if (status === 403) {
       return new VisaApiForbiddenError("Visa API returned 403", {
+        status,
+        operation,
+        responseBody: body,
+      });
+    }
+    if (status === 409) {
+      return new VisaSlotConflictError("Visa API reported a slot conflict", {
         status,
         operation,
         responseBody: body,
@@ -336,7 +359,6 @@ class VisaApiClient {
         { operation },
       );
     }
-
     // Refresh immediately before the single final mutation. This keeps the
     // worker's explicit API headers aligned with the active browser session.
     await this.refreshAuthFromPage();
@@ -345,6 +367,19 @@ class VisaApiClient {
     const op = operation || `${method} ${path}`;
     const startedAt = Date.now();
     const headers = this._headers({ json: data !== undefined });
+
+    this.logger("info", {
+      operation: op,
+      event: "final_request_contract",
+      method,
+      bodyShape: Array.isArray(data) ? "array" : typeof data,
+      itemCount: Array.isArray(data) ? data.length : null,
+      itemKeys:
+        Array.isArray(data) && data[0] && typeof data[0] === "object"
+          ? Object.keys(data[0]).sort()
+          : [],
+      transport: "browser-page",
+    });
 
     // The browser owns these context-sensitive headers. Supplying them through
     // Playwright's page fetch would either be ignored or mask the native values.
@@ -407,6 +442,13 @@ class VisaApiClient {
     });
 
     if (status < 200 || status >= 300) {
+      this.logger("warn", {
+        operation: op,
+        event: "final_response_diagnostics",
+        status,
+        ...providerDiagnostics(body),
+        transport: "browser-page",
+      });
       this.logger("warn", {
         operation: op,
         event: "request_failed",
@@ -538,18 +580,19 @@ class VisaApiClient {
   }
 
   async submitPendingAppointment(payload) {
+    const mutationBody = [payload];
     if (this.finalMutationInPage) {
       return this.requestInPage(
         "PUT",
         "/visaappointmentapi/appointments/schedule/group",
-        { data: payload, operation: "submitPendingAppointment" },
+        { data: mutationBody, operation: "submitPendingAppointment" },
       );
     }
     return this.request(
       "PUT",
       "/visaappointmentapi/appointments/schedule/group",
       {
-        data: payload,
+        data: mutationBody,
         operation: "submitPendingAppointment",
         readOnly: false,
       },
@@ -557,18 +600,19 @@ class VisaApiClient {
   }
 
   async submitRescheduleAppointment(payload) {
+    const mutationBody = [payload];
     if (this.finalMutationInPage) {
       return this.requestInPage(
         "PUT",
         "/visaappointmentapi/appointments/schedule/group",
-        { data: payload, operation: "submitRescheduleAppointment" },
+        { data: mutationBody, operation: "submitRescheduleAppointment" },
       );
     }
     return this.request(
       "PUT",
       "/visaappointmentapi/appointments/schedule/group",
       {
-        data: payload,
+        data: mutationBody,
         operation: "submitRescheduleAppointment",
         readOnly: false,
       },

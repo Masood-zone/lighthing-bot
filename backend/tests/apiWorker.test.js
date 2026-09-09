@@ -11,6 +11,7 @@ const {
   VisaNoDatesAvailableError,
   VisaNoSlotsAvailableError,
   VisaBookingVerificationError,
+  VisaSlotConflictError,
 } = require("../src/services/visaApi");
 
 const context = {
@@ -221,4 +222,37 @@ test("ambiguous final mutation is not replayed after read-only verification", as
   );
   assert.equal(mutationCalls, 1);
   assert.equal(verificationCalls, 1);
+});
+
+test("a confirmed slot conflict is returned for a fresh availability scan", async () => {
+  let verificationCalls = 0;
+  const client = {
+    async submitPendingAppointment() {
+      throw new VisaSlotConflictError("slot conflict", { status: 409 });
+    },
+    async searchCurrentAppointments() {
+      verificationCalls += 1;
+      return [];
+    },
+  };
+  const submissionContext = {
+    appointment: {
+      applicantId: "applicant-1",
+      applicationId: "application-1",
+      appointmentId: "appointment-1",
+      appointmentLocationType: "POST",
+      postUserId: "483",
+    },
+  };
+
+  await assert.rejects(
+    submitAndVerify({
+      client,
+      context: submissionContext,
+      selectedDate: "2026-12-02",
+      selectedSlot: usableSlot("2026-12-02"),
+    }),
+    VisaSlotConflictError,
+  );
+  assert.equal(verificationCalls, 0);
 });

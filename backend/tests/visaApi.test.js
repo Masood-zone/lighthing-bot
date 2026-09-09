@@ -19,6 +19,7 @@ const {
   VisaApplicationNotFoundError,
   VisaNoDatesAvailableError,
   VisaNoSlotsAvailableError,
+  VisaSlotConflictError,
   VisaBookingVerificationError,
   bootstrapAppointmentSurface,
   shouldRunContextBootstrap,
@@ -704,14 +705,71 @@ test("fresh pending booking uses the observed PUT contract with page-refreshed a
     finalMutationInPage: true,
   });
 
-  await client.submitPendingAppointment({ appointmentId: "appointment-1" });
+  const payload = { appointmentId: "appointment-1" };
+  await client.submitPendingAppointment(payload);
 
   assert.equal(pageRequests.length, 1);
   assert.equal(pageRequests[0].requestMethod, "PUT");
   assert.equal(pageRequests[0].requestHeaders.Authorization, "Bearer fresh-browser-token");
+  assert.deepEqual(pageRequests[0].requestData, [payload]);
 });
 
-test("verification requires scheduled status and selected slot fields", () => {
+test("pending and reschedule mutations both send one-item arrays", async () => {
+  const requests = [];
+  const response = {
+    status: () => 200,
+    headers: () => ({}),
+    text: async () => "{}",
+  };
+  const client = new VisaApiClient({
+    context: {
+      request: {
+        async fetch(_url, options) {
+          requests.push(options);
+          return response;
+        },
+      },
+    },
+    auth: {},
+  });
+
+  await client.submitPendingAppointment({ appointmentId: "pending-1" });
+  await client.submitRescheduleAppointment({ appointmentId: "scheduled-1" });
+
+  assert.deepEqual(requests.map(({ method }) => method), ["PUT", "PUT"]);
+  assert.deepEqual(requests.map(({ data }) => JSON.parse(data)), [
+    [{ appointmentId: "pending-1" }],
+    [{ appointmentId: "scheduled-1" }],
+  ]);
+});
+
+test("HTTP 409 is classified as a slot conflict", async () => {
+  const client = new VisaApiClient({
+    context: {
+      request: {
+        async fetch() {
+          return {
+            status: () => 409,
+            headers: () => ({}),
+            text: async () => JSON.stringify({
+              status: 409,
+              httpStatus: "CONFLICT",
+              responseMessage: "Appointment booking failed",
+            }),
+          };
+        },
+      },
+    },
+    auth: {},
+  });
+
+  await assert.rejects(
+    client.submitPendingAppointment({ appointmentId: "appointment-1" }),
+    VisaSlotConflictError,
+  );
+});
+
+test("verification requires scheduled status, identity, date, and time", () => {
   const payload = {
     applicantId: "applicant-1",
     applicationId: "application-1",
@@ -741,6 +799,18 @@ test("verification requires scheduled status and selected slot fields", () => {
       payload,
     ),
     false,
+  );
+
+  assert.equal(
+    appointmentMatchesSubmission(
+      {
+        ...payload,
+        appointmentStatus: "SCHEDULED",
+        slotId: "server-assigned-slot",
+      },
+      payload,
+    ),
+    true,
   );
 });
 

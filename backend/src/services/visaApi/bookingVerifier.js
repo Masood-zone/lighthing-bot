@@ -13,8 +13,7 @@ function appointmentMatchesSubmission(appointment, payload) {
     String(appointment.appointmentStatus) === "SCHEDULED" &&
     appointmentDate === payloadDate &&
     String(appointment.appointmentTime || "").trim() ===
-      String(payload.appointmentTime || "").trim() &&
-    String(appointment.slotId || "") === String(payload.slotId || "")
+      String(payload.appointmentTime || "").trim()
   );
 }
 
