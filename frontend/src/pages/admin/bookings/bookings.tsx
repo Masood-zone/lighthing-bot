@@ -1,3 +1,4 @@
+import axios from "axios";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -56,8 +57,9 @@ function BookingsPage() {
   const addOrUpdateSession = useBookingSessionStore(
     (state) => state.addOrUpdateSession,
   );
-  const syncActiveUsers = useBookingSessionStore(
-    (state) => state.syncActiveUsers,
+  const removeSession = useBookingSessionStore((state) => state.removeSession);
+  const reconcileUsers = useBookingSessionStore(
+    (state) => state.reconcileUsers,
   );
   const [pendingById, setPendingById] = useState<
     Record<string, "starting" | "stopping" | undefined>
@@ -69,10 +71,8 @@ function BookingsPage() {
   );
 
   useEffect(() => {
-    if (users?.length) {
-      syncActiveUsers(users);
-    }
-  }, [syncActiveUsers, users]);
+    if (users) reconcileUsers(users);
+  }, [reconcileUsers, users]);
 
   const startOne = async (user: BotUser) => {
     const sessionId = user.id;
@@ -131,6 +131,14 @@ function BookingsPage() {
         description: session.user.config?.email || session.user.id,
       });
     } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        removeSession(sessionId);
+        toast.info("Removed deleted user session", {
+          description: "This user no longer exists on the server.",
+        });
+        return;
+      }
+
       toast.error("Failed to stop session", {
         description: getApiErrorMessage(error),
       });

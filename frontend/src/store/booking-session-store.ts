@@ -22,7 +22,8 @@ type BookingSessionStore = {
     updater: (prev: UiSession) => UiSession,
     fallbackUser?: BotUser,
   ) => void;
-  syncActiveUsers: (users: BotUser[]) => void;
+  removeSession: (sessionId: string) => void;
+  reconcileUsers: (users: BotUser[]) => void;
 };
 
 function getActiveUserLastEvent(user: BotUser) {
@@ -66,26 +67,58 @@ export const useBookingSessionStore = create<BookingSessionStore>()(
           return { sessions: [...state.sessions, updater(created)] };
         });
       },
-      syncActiveUsers: (users) => {
+      removeSession: (sessionId) => {
+        set((state) => ({
+          selectedUserId:
+            state.selectedUserId === sessionId
+              ? undefined
+              : state.selectedUserId,
+          sessions: state.sessions.filter((session) => session.id !== sessionId),
+        }));
+      },
+      reconcileUsers: (users) => {
         set((state) => {
-          const sessionById = new Map(
-            state.sessions.map((session) => [session.id, session]),
-          );
+          const usersById = new Map(users.map((user) => [user.id, user]));
+          const sessionById = new Map<string, UiSession>();
+
+          for (const session of state.sessions) {
+            const user = usersById.get(session.id);
+            if (!user) continue;
+
+            const active = user.status === "QUEUED" || user.status === "RUNNING";
+            sessionById.set(session.id, {
+              ...session,
+              user,
+              ...(active
+                ? {
+                    status: "queued",
+                    lastEvent:
+                      session.status === "queued" && session.lastEvent
+                        ? session.lastEvent
+                        : getActiveUserLastEvent(user),
+                  }
+                : {}),
+            });
+          }
 
           for (const user of users) {
-            if (user.status !== "QUEUED" && user.status !== "RUNNING") continue;
+            const active = user.status === "QUEUED" || user.status === "RUNNING";
+            if (!active || sessionById.has(user.id)) continue;
 
-            const existing = sessionById.get(user.id);
             sessionById.set(user.id, {
               id: user.id,
               user,
               status: "queued",
-              lastEvent: existing?.lastEvent || getActiveUserLastEvent(user),
-              lastResponse: existing?.lastResponse,
+              lastEvent: getActiveUserLastEvent(user),
             });
           }
 
-          return { sessions: Array.from(sessionById.values()) };
+          return {
+            selectedUserId: usersById.has(state.selectedUserId || "")
+              ? state.selectedUserId
+              : undefined,
+            sessions: Array.from(sessionById.values()),
+          };
         });
       },
     }),
