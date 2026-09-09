@@ -99,3 +99,21 @@ test("worker pool resolves per-user execution mode with dom as fallback", () => 
   );
   assert.equal(resolveSessionExecutionMode({ config: {} }), "dom");
 });
+
+test("worker pool can update desktop booking alerts without a restart", () => {
+  const dataDir = makeTempDir();
+  const desktopNotificationService = { enabled: false };
+  const pool = new WorkerPool({
+    store: new SessionStore({ dataDir }),
+    maxConcurrent: 0,
+    workerEntry: path.join(dataDir, "noop-worker.js"),
+    baseDir: dataDir,
+    desktopNotificationService,
+    desktopNotificationsEnabled: false,
+  });
+
+  assert.equal(pool.setDesktopNotificationsEnabled(true), true);
+  assert.equal(desktopNotificationService.enabled, true);
+  assert.equal(pool.setDesktopNotificationsEnabled(false), false);
+  assert.equal(desktopNotificationService.enabled, false);
+});

@@ -1,5 +1,6 @@
-import { IconMail, IconPencil } from "@tabler/icons-react";
+import { IconDeviceDesktop, IconMail, IconPencil } from "@tabler/icons-react";
 import { useState } from "react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,12 +12,30 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useNotificationsQuery } from "@/services/notifications/notifications-queries";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  useDesktopNotificationsQuery,
+  useNotificationsQuery,
+  useSaveDesktopNotificationsEnabled,
+} from "@/services/notifications/notifications-queries";
 import { NotificationEmailModal } from "@/components/sidebar/notification-email-modal";
 
 export function NotificationEmailCard() {
   const { data: recipient, isLoading } = useNotificationsQuery();
+  const { data: desktopEnabled, isLoading: isDesktopLoading } =
+    useDesktopNotificationsQuery();
+  const saveDesktopEnabled = useSaveDesktopNotificationsEnabled();
   const [open, setOpen] = useState(false);
+
+  const setDesktopNotifications = async (checked: boolean | "indeterminate") => {
+    const enabled = checked === true;
+    try {
+      await saveDesktopEnabled.mutateAsync(enabled);
+      toast.success(enabled ? "Desktop booking alerts enabled" : "Desktop booking alerts disabled");
+    } catch {
+      toast.error("Could not update desktop booking alerts");
+    }
+  };
 
   return (
     <>
@@ -53,6 +72,23 @@ export function NotificationEmailCard() {
               </div>
             </div>
           )}
+          <div className="flex items-start justify-between gap-3 rounded-lg border bg-muted/20 p-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <IconDeviceDesktop className="size-4" />
+                Desktop booking alerts
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Show a Windows notification on this backend computer only after a confirmed booking.
+              </p>
+            </div>
+            <Checkbox
+              aria-label="Enable desktop booking alerts"
+              checked={desktopEnabled === true}
+              disabled={isDesktopLoading || saveDesktopEnabled.isPending}
+              onCheckedChange={setDesktopNotifications}
+            />
+          </div>
         </CardContent>
       </Card>
 

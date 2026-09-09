@@ -12,7 +12,7 @@ function toPublicRecipient(recipient) {
   };
 }
 
-function createNotificationsRouter({ notificationStore }) {
+function createNotificationsRouter({ notificationStore, pool }) {
   const router = express.Router();
 
   function requireAdminRole(req, res) {
@@ -28,7 +28,24 @@ function createNotificationsRouter({ notificationStore }) {
     if (!requireAdminRole(req, res)) return;
     res.json({
       recipient: toPublicRecipient(notificationStore.getRecipient()),
+      desktopNotificationsEnabled: notificationStore.getDesktopNotificationsEnabled(),
     });
+  });
+
+  router.put("/desktop", (req, res) => {
+    if (!requireAdminRole(req, res)) return;
+
+    const { enabled } = req.body || {};
+    if (typeof enabled !== "boolean") {
+      return res.status(400).json({ error: "enabled_boolean_required" });
+    }
+
+    const desktopNotificationsEnabled =
+      notificationStore.setDesktopNotificationsEnabled(enabled);
+    if (pool && typeof pool.setDesktopNotificationsEnabled === "function") {
+      pool.setDesktopNotificationsEnabled(desktopNotificationsEnabled);
+    }
+    return res.status(200).json({ desktopNotificationsEnabled });
   });
 
   router.put("/", (req, res) => {

@@ -11,6 +11,26 @@ export function useNotificationsQuery() {
   });
 }
 
+export function useDesktopNotificationsQuery() {
+  return useQuery<boolean>({
+    queryKey: notificationsKeys.desktop(),
+    queryFn: api.getDesktopNotificationsEnabled,
+  });
+}
+
+export function useSaveDesktopNotificationsEnabled() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (enabled: boolean) => api.saveDesktopNotificationsEnabled(enabled),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: notificationsKeys.desktop(),
+      });
+    },
+  });
+}
+
 export function useSaveNotificationRecipient() {
   const queryClient = useQueryClient();
 

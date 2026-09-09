@@ -431,6 +431,7 @@ class WorkerPool {
     profilesDir,
     notificationService,
     desktopNotificationService,
+    desktopNotificationsEnabled,
   }) {
     this.store = store;
     // Allow disabling worker execution entirely by setting MAX_CONCURRENT=0.
@@ -470,7 +471,9 @@ class WorkerPool {
     this.notificationService = notificationService || null;
     this.desktopNotificationService = desktopNotificationService || null;
     this.desktopNotificationsEnabled =
-      readBoolEnv("VISA_ENABLE_DESKTOP_NOTIFICATIONS") === true;
+      typeof desktopNotificationsEnabled === "boolean"
+        ? desktopNotificationsEnabled
+        : readBoolEnv("VISA_ENABLE_DESKTOP_NOTIFICATIONS") === true;
 
     /** @type {Map<string, {dateKey?: string, timeSlot?: string}>} */
     this.bookingContext = new Map();
@@ -510,6 +513,14 @@ class WorkerPool {
       queuedCount: this.queue.length,
       ts: nowIso(),
     };
+  }
+
+  setDesktopNotificationsEnabled(enabled) {
+    this.desktopNotificationsEnabled = Boolean(enabled);
+    if (this.desktopNotificationService) {
+      this.desktopNotificationService.enabled = this.desktopNotificationsEnabled;
+    }
+    return this.desktopNotificationsEnabled;
   }
 
   enqueue(sessionId) {

@@ -73,6 +73,10 @@ const adminRecipientStore = new AdminRecipientStore({
 const notificationStore = new NotificationStore({
   dataDir: DATA_DIR,
   seedFilePath: path.join(BASE_DIR, "notification-email.json"),
+  desktopNotificationsEnabled:
+    ["1", "true", "yes", "on"].includes(
+      String(process.env.VISA_ENABLE_DESKTOP_NOTIFICATIONS || "").trim().toLowerCase(),
+    ),
 });
 const authService = new AuthService({
   tokenTtlMs: Number(process.env.AUTH_TOKEN_TTL_MS || 1000 * 60 * 60 * 12),
@@ -83,7 +87,9 @@ const notificationService = new EmailNotificationService({
   notificationStore,
   sessionStore: store,
 });
-const desktopNotificationService = new DesktopNotificationService();
+const desktopNotificationService = new DesktopNotificationService({
+  enabled: notificationStore.getDesktopNotificationsEnabled(),
+});
 
 const ensure = userStore.ensureAdminFromEnv();
 if (ensure?.created && ensure?.via === "env") {
@@ -110,6 +116,7 @@ const pool = new WorkerPool({
   profilesDir: PROFILES_DIR,
   notificationService,
   desktopNotificationService,
+  desktopNotificationsEnabled: notificationStore.getDesktopNotificationsEnabled(),
 });
 
 const requireAuthMiddleware = requireAuth({ authService, userStore });
@@ -122,6 +129,7 @@ app.use(
     userStore,
     adminRecipientStore,
     notificationStore,
+    pool,
     authService,
     requireAuthMiddleware,
   }),

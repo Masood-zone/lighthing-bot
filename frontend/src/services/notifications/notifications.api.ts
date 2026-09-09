@@ -7,6 +7,18 @@ export async function getNotificationRecipient(): Promise<NotificationRecipient 
   return data.recipient ?? null;
 }
 
+export async function getDesktopNotificationsEnabled(): Promise<boolean> {
+  const response = await apiClient.get("/notifications");
+  const data = response.data as { desktopNotificationsEnabled?: boolean };
+  return data.desktopNotificationsEnabled === true;
+}
+
+export async function saveDesktopNotificationsEnabled(enabled: boolean): Promise<boolean> {
+  const response = await apiClient.put("/notifications/desktop", { enabled });
+  const data = response.data as { desktopNotificationsEnabled?: boolean };
+  return data.desktopNotificationsEnabled === true;
+}
+
 export async function saveNotificationRecipient(input: {
   email: string;
   name?: string;

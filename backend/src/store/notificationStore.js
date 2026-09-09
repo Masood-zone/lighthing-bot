@@ -23,13 +23,14 @@ class NotificationStore {
   /**
    * @param {{ dataDir: string, seedFilePath?: string }} opts
    */
-  constructor({ dataDir, seedFilePath } = {}) {
+  constructor({ dataDir, seedFilePath, desktopNotificationsEnabled = false } = {}) {
     this.dataDir = dataDir;
     this.filePath = path.join(this.dataDir, "notification-email.json");
     this.seedFilePath =
       seedFilePath && typeof seedFilePath === "string" ? seedFilePath : "";
     this.state = {
       recipient: null,
+      desktopNotificationsEnabled: Boolean(desktopNotificationsEnabled),
     };
     this._load();
   }
@@ -46,6 +47,10 @@ class NotificationStore {
       if (parsed && typeof parsed === "object") {
         this.state = {
           recipient: parsed.recipient || null,
+          desktopNotificationsEnabled:
+            typeof parsed.desktopNotificationsEnabled === "boolean"
+              ? parsed.desktopNotificationsEnabled
+              : this.state.desktopNotificationsEnabled,
         };
       }
     } catch {
@@ -63,7 +68,7 @@ class NotificationStore {
       if (!parsed || typeof parsed !== "object") return false;
 
       if (parsed.recipient && typeof parsed.recipient === "object") {
-        this.state = { recipient: parsed.recipient };
+        this.state = { ...this.state, recipient: parsed.recipient };
         this._save();
         return true;
       }
@@ -96,6 +101,19 @@ class NotificationStore {
 
   getRecipient() {
     return this.state.recipient;
+  }
+
+  getDesktopNotificationsEnabled() {
+    return this.state.desktopNotificationsEnabled === true;
+  }
+
+  setDesktopNotificationsEnabled(enabled) {
+    this.state = {
+      ...this.state,
+      desktopNotificationsEnabled: Boolean(enabled),
+    };
+    this._save();
+    return this.state.desktopNotificationsEnabled;
   }
 
   setRecipient({ email, name = "", active = true } = {}) {
