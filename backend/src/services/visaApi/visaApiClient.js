@@ -299,6 +299,9 @@ class VisaApiClient {
     const op = operation || `${method} ${path}`;
     const startedAt = Date.now();
     const headers = this._headers({ json: data !== undefined });
+
+    // The browser owns these context-sensitive headers. Supplying them through
+    // Playwright's page fetch would either be ignored or mask the native values.
     delete headers.Referer;
     delete headers["User-Agent"];
 
@@ -373,7 +376,8 @@ class VisaApiClient {
       });
     }
 
-    await this._updateAuthFromResponse({ headers: () => result.headers || {} });
+    const responseHeaders = result.headers || {};
+    await this._updateAuthFromResponse({ headers: () => responseHeaders });
     return body;
   }
 

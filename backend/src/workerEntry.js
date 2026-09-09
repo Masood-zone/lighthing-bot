@@ -8,7 +8,7 @@ const executionMode = String(
   .toLowerCase();
 
 if (executionMode === "api") {
-  require("../main/api-worker");
+  require("../main/api-worker").start();
 } else if (executionMode === "selenium") {
   require("../main/visa-bot");
 } else {

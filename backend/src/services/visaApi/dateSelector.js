@@ -175,41 +175,6 @@ function currentMonthRange(now = new Date()) {
   };
 }
 
-function buildMonthScanPlan({ firstAvailableDate, minDate, maxDate } = {}) {
-  const firstDate = parseIsoDateOnly(firstAvailableDate);
-  const minimum = parseIsoDateOnly(minDate);
-  const maximum = parseIsoDateOnly(maxDate);
-  const platformMonth = monthRangeFor(firstDate);
-  if (!platformMonth) return [];
-
-  const startMonthDate =
-    minimum && minimum > platformMonth.toDate
-      ? minimum
-      : platformMonth.fromDate;
-  const startMonth = monthRangeFor(startMonthDate);
-  if (!startMonth || (maximum && startMonth.fromDate > maximum)) return [];
-
-  const effectiveMaximum = maximum || startMonth.toDate;
-  const plan = [];
-  let cursor = toDateUtc(startMonth.fromDate);
-
-  while (cursor) {
-    const monthStart = formatIsoDateOnly(cursor);
-    if (monthStart > effectiveMaximum) break;
-    const monthRange = monthRangeFor(monthStart);
-    const fromDate = laterDate(monthRange.fromDate, minimum);
-    const toDate = earlierDate(monthRange.toDate, effectiveMaximum);
-    if (fromDate && toDate && fromDate <= toDate) {
-      plan.push({ fromDate, toDate });
-    }
-    cursor = new Date(
-      Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1),
-    );
-  }
-
-  return plan;
-}
-
 function laterDate(a, b) {
   if (!a) return b || null;
   if (!b) return a || null;
@@ -220,6 +185,41 @@ function earlierDate(a, b) {
   if (!a) return b || null;
   if (!b) return a || null;
   return a < b ? a : b;
+}
+
+function buildMonthScanPlan({ firstAvailableDate, minDate, maxDate } = {}) {
+  const first = parseIsoDateOnly(firstAvailableDate);
+  if (!first) return [];
+
+  const platformMonth = monthRangeFor(first);
+  const startDate = laterDate(
+    platformMonth?.fromDate,
+    parseIsoDateOnly(minDate),
+  );
+  const firstRange = monthRangeFor(startDate);
+  if (!firstRange) return [];
+
+  const configuredMax = parseIsoDateOnly(maxDate);
+  const endDate = configuredMax || firstRange.toDate;
+  if (startDate > endDate) return [];
+
+  const plan = [];
+  let cursor = firstRange.fromDate;
+  while (cursor <= endDate) {
+    const range = monthRangeFor(cursor);
+    if (!range) break;
+    const clipped = {
+      fromDate: laterDate(range.fromDate, startDate),
+      toDate: earlierDate(range.toDate, endDate),
+    };
+    if (clipped.fromDate <= clipped.toDate) plan.push(clipped);
+
+    const current = toDateUtc(range.fromDate);
+    current.setUTCMonth(current.getUTCMonth() + 1);
+    cursor = formatIsoDateOnly(current);
+  }
+
+  return plan;
 }
 
 function platformDateTime(dateOnly) {
@@ -236,8 +236,8 @@ module.exports = {
   selectAvailableDate,
   monthRangeFor,
   currentMonthRange,
-  buildMonthScanPlan,
   laterDate,
   earlierDate,
+  buildMonthScanPlan,
   platformDateTime,
 };

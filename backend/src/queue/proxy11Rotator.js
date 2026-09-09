@@ -64,9 +64,13 @@ function buildProxyUrlFromEntry(entry, fallbackPort = "") {
 
   const rawPort =
     String(entry?.port || "").trim() || String(fallbackPort || "").trim();
-  const protocol = Number(entry?.type) === 1 ? "https" : "http";
+  // Proxy11's `type` describes whether the HTTP proxy can tunnel HTTPS
+  // destinations. It does not mean that the connection to the proxy itself
+  // uses TLS. Treating type=1 as an HTTPS proxy makes Chrome attempt a TLS
+  // handshake with a plain HTTP endpoint (often on port 80), which leaves
+  // every page at ERR_PROXY_CONNECTION_FAILED.
   return normalizeProxyUrl(
-    `${protocol}://${ip}${rawPort ? `:${rawPort}` : ""}`,
+    `http://${ip}${rawPort ? `:${rawPort}` : ""}`,
   );
 }
 
@@ -262,6 +266,7 @@ class Proxy11Rotator {
 
 module.exports = {
   Proxy11Rotator,
+  buildProxyUrlFromEntry,
   buildProxy11ApiUrl,
   describeProxyUrl,
   normalizeProxyUrl,

@@ -1,5 +1,8 @@
 const { chromium } = require("playwright");
-const { createPerfTracer } = require("../src/perfTrace");
+
+function isPerfTraceEnabled(value) {
+  return value === "1";
+}
 
 try {
   // eslint-disable-next-line global-require
@@ -94,10 +97,27 @@ const CONFIG = {
   SELECTED_POST_USER_ID: String(
     process.env.VISA_SELECTED_POST_USER_ID || process.env.VISA_POST_USER_ID || "483",
   ),
+  PERF_TRACE: isPerfTraceEnabled(process.env.VISA_PERF_TRACE),
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const perfTrace = createPerfTracer({ mode: "api" });
+
+function startPerfTrace() {
+  return CONFIG.PERF_TRACE ? Date.now() : null;
+}
+
+function perfTrace(operation, startedAt, context = {}) {
+  if (!CONFIG.PERF_TRACE || startedAt == null) return;
+  console.log(
+    JSON.stringify({
+      type: "visa_perf",
+      mode: "api",
+      operation,
+      durationMs: Date.now() - startedAt,
+      ...context,
+    }),
+  );
+}
 
 function sendWorkerMessage(message) {
   try {
@@ -502,121 +522,130 @@ function chooseNextDateCandidate({
   dates,
   window,
   currentAppointmentDate,
-  exactDate,
-  fallbackStrategy,
+  preferences,
 }) {
+  const exactDate = parseIsoDateOnly(preferences.exactDate);
+  const fallbackStrategy = exactDate
+    ? preferences.exactDateFallback
+    : "EARLIEST_ACCEPTABLE";
   return selectAvailableDate({
     availableDates: dates,
     minDate: window.minDate,
     maxDate: window.maxDate,
     exactDate,
     fallbackStrategy,
-    mode: CONFIG.RESCHEDULE ? "reschedule" : "pending",
+    mode: preferences.mode,
     currentAppointmentDate,
-    allowSameDateReschedule: CONFIG.ALLOW_SAME_DATE_RESCHEDULE,
+    allowSameDateReschedule: preferences.allowSameDateReschedule,
   });
 }
 
-async function findDateAndSlot({ client, context, dateWindow = null }) {
-  const finishFind = perfTrace.start("findDateAndSlot");
+async function findDateAndSlot({ client, context, preferences: overrides }) {
+  const perfStartedAt = startPerfTrace();
   try {
-  status("SCANNING_DATES", "Checking first available appointment month");
-  const firstMonth = await perfTrace.measure(
-    "getFirstAvailableMonth",
-    () => client.getFirstAvailableMonth(context.availability),
-  );
-  if (!firstMonth?.present || !firstMonth?.date) {
-    throw new VisaNoDatesAvailableError("No first available month returned");
-  }
-
-  const window = dateWindow || getDatePreferencesSnapshot();
-  const ranges = buildMonthScanPlan({
-    firstAvailableDate: firstMonth.date,
-    minDate: window.minDate,
-    maxDate: window.maxDate,
-  });
-
-  if (!ranges.length) {
-    throw new VisaNoDatesAvailableError("First available month is outside the configured date window");
-  }
-
-  const currentAppointmentDate = parseIsoDateOnly(context.appointment.appointmentDt);
-  const exactDate = parseIsoDateOnly(CONFIG.EXACT_DATE);
-  const fallbackStrategy = exactDate
-    ? CONFIG.EXACT_DATE_FALLBACK
-    : "EARLIEST_ACCEPTABLE";
-  let acceptableDateFound = false;
-
-  for (const range of ranges) {
-    // Requests stay chronological and dependent; do not parallelize this loop.
-    // eslint-disable-next-line no-await-in-loop
-    const rawDates = await perfTrace.measure(
-      "getAvailableDates",
-      () => client.getAvailableDates(context.availability, range),
-      { fromDate: range.fromDate, toDate: range.toDate },
+    const window = overrides?.window || getDatePreferencesSnapshot();
+    const preferences = {
+      exactDate: overrides?.exactDate ?? CONFIG.EXACT_DATE,
+      exactDateFallback:
+        overrides?.exactDateFallback ?? CONFIG.EXACT_DATE_FALLBACK,
+      mode: overrides?.mode || (CONFIG.RESCHEDULE ? "reschedule" : "pending"),
+      allowSameDateReschedule:
+        overrides?.allowSameDateReschedule ?? CONFIG.ALLOW_SAME_DATE_RESCHEDULE,
+    };
+    const currentAppointmentDate = parseIsoDateOnly(
+      context.appointment.appointmentDt,
     );
-    const availableDates = normalizeAvailableDates(rawDates).filter(
-      (date) => date >= range.fromDate && date <= range.toDate,
-    );
-    const tried = new Set();
 
-    while (tried.size < availableDates.length) {
-      const selection = chooseNextDateCandidate({
-        dates: availableDates.filter((date) => !tried.has(date)),
-        window,
-        currentAppointmentDate,
-        exactDate,
-        fallbackStrategy,
-      });
-      if (!selection.selectedDate) break;
+    status("SCANNING_DATES", "Checking first available appointment month");
+    const firstMonthStartedAt = startPerfTrace();
+    const firstMonth = await client.getFirstAvailableMonth(context.availability);
+    perfTrace("getFirstAvailableMonth", firstMonthStartedAt);
+    if (!firstMonth?.present || !firstMonth?.date) {
+      throw new VisaNoDatesAvailableError("No first available month returned");
+    }
 
-      const selectedDate = selection.selectedDate;
-      acceptableDateFound = true;
-      tried.add(selectedDate);
-      status("DATE_SELECTED", selectedDate);
-      status("FETCHING_SLOTS", `Fetching slots for ${selectedDate}`);
+    const ranges = buildMonthScanPlan({
+      firstAvailableDate: firstMonth.date,
+      minDate: window.minDate,
+      maxDate: window.maxDate,
+    });
+    if (!ranges.length) {
+      throw new VisaNoDatesAvailableError(
+        "First available month is outside the configured date window",
+      );
+    }
 
-      const slotLookupRange = monthRangeFor(selectedDate);
+    let acceptableDateFound = false;
+    for (const range of ranges) {
+      const availableDatesStartedAt = startPerfTrace();
       // eslint-disable-next-line no-await-in-loop
-      const slots = await perfTrace.measure(
-        "getAvailableTimeSlots",
-        () => client.getAvailableTimeSlots(context.availability, {
+      const rawDates = await client.getAvailableDates(
+        context.availability,
+        range,
+      );
+      perfTrace("getAvailableDates", availableDatesStartedAt, { range });
+      const availableDates = normalizeAvailableDates(rawDates).filter(
+        (date) => date >= range.fromDate && date <= range.toDate,
+      );
+      const tried = new Set();
+
+      while (tried.size < availableDates.length) {
+        const selection = chooseNextDateCandidate({
+          dates: availableDates.filter((date) => !tried.has(date)),
+          window,
+          currentAppointmentDate,
+          preferences,
+        });
+        if (!selection.selectedDate) break;
+
+        acceptableDateFound = true;
+        const selectedDate = selection.selectedDate;
+        tried.add(selectedDate);
+        status("DATE_SELECTED", selectedDate);
+        status("FETCHING_SLOTS", `Fetching slots for ${selectedDate}`);
+
+        const slotLookupRange = monthRangeFor(selectedDate);
+        const slotsStartedAt = startPerfTrace();
+        // eslint-disable-next-line no-await-in-loop
+        const slots = await client.getAvailableTimeSlots(context.availability, {
           slotDate: selectedDate,
           fromDate: slotLookupRange.fromDate,
           toDate: slotLookupRange.toDate,
-        }),
-        { slotDate: selectedDate },
-      );
+        });
+        perfTrace("getAvailableTimeSlots", slotsStartedAt, {
+          slotDate: selectedDate,
+        });
 
-      const slotSelection = selectEarliestUsableSlot(slots);
-      if (!slotSelection.selectedSlot) {
-        status("NO_SLOTS_AVAILABLE", `No usable slots for ${selectedDate}`);
-        continue;
+        const slotSelection = selectEarliestUsableSlot(slots);
+        if (!slotSelection.selectedSlot) {
+          status("NO_SLOTS_AVAILABLE", `No usable slots for ${selectedDate}`);
+          continue;
+        }
+
+        status(
+          "SLOT_SELECTED",
+          `Time slot selected: ${formatAppointmentTime(
+            slotSelection.selectedSlot.startTime,
+          )}`,
+        );
+        return {
+          selectedDate,
+          selectedSlot: slotSelection.selectedSlot,
+          searchRange: range,
+        };
       }
-
-      status(
-        "SLOT_SELECTED",
-        `Time slot selected: ${formatAppointmentTime(
-          slotSelection.selectedSlot.startTime,
-        )}`,
-      );
-      const result = {
-        selectedDate,
-        selectedSlot: slotSelection.selectedSlot,
-        searchRange: range,
-      };
-      finishFind({ outcome: "success", selectedDate });
-      return result;
     }
-  }
 
-  if (acceptableDateFound) {
-    throw new VisaNoSlotsAvailableError("No usable slots in configured date window");
-  }
-  throw new VisaNoDatesAvailableError("No acceptable dates in configured date window");
-  } catch (error) {
-    finishFind({ outcome: "error", errorName: error?.name || "Error" });
-    throw error;
+    if (!acceptableDateFound) {
+      throw new VisaNoDatesAvailableError(
+        "No acceptable dates available in configured date window",
+      );
+    }
+    throw new VisaNoSlotsAvailableError(
+      "Acceptable dates were found but none had usable slots",
+    );
+  } finally {
+    perfTrace("findDateAndSlot", perfStartedAt);
   }
 }
 
@@ -701,10 +730,14 @@ async function submitAndVerify({ client, context, selectedDate, selectedSlot }) 
 }
 
 async function runApiHuntCycle({ client, context }) {
-  const { selectedDate, selectedSlot } = await perfTrace.measure(
-    "api_hunt_before_submission",
-    () => findDateAndSlot({ client, context }),
-  );
+  const perfStartedAt = startPerfTrace();
+  const { selectedDate, selectedSlot } = await findDateAndSlot({
+    client,
+    context,
+  });
+  perfTrace("api_hunt_before_final_submission", perfStartedAt, {
+    result: "selection_ready",
+  });
   const verified = await submitAndVerify({
     client,
     context,
@@ -753,6 +786,8 @@ async function main() {
       page,
       auth,
       baseUrl: getBaseUrl(),
+      // Submit only through the authenticated page so the browser supplies its
+      // own same-origin cookie, Origin, Referer, and fetch metadata context.
       finalMutationInPage: true,
       logger: (level, payload) => {
         const event = payload?.event || "";
@@ -879,12 +914,8 @@ async function main() {
   }
 }
 
-const loadedByWorkerEntry = /[\\/]src[\\/]workerEntry\.js$/i.test(
-  module.parent?.filename || "",
-);
-
-if (require.main === module || loadedByWorkerEntry) {
-  main().catch((error) => {
+function start() {
+  return main().catch((error) => {
     status("ERROR", error?.message || String(error));
     // eslint-disable-next-line no-console
     console.error(error);
@@ -892,4 +923,13 @@ if (require.main === module || loadedByWorkerEntry) {
   });
 }
 
-module.exports = { findDateAndSlot, submitAndVerify };
+if (require.main === module) {
+  start();
+}
+
+module.exports = {
+  findDateAndSlot,
+  isPerfTraceEnabled,
+  start,
+  submitAndVerify,
+};

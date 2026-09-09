@@ -190,10 +190,12 @@ test("API hunt scans months and dates sequentially until a later month succeeds"
   const result = await findDateAndSlot({
     client,
     context: { availability: {}, appointment: {} },
-    dateWindow: {
-      minDate: "2026-10-01",
-      maxDate: "2026-12-31",
-      source: "absolute",
+    preferences: {
+      window: {
+        minDate: "2026-10-01",
+        maxDate: "2026-12-31",
+        source: "absolute",
+      },
     },
   });
 
@@ -230,7 +232,7 @@ test("API hunt distinguishes no acceptable dates from dates without slots", asyn
     findDateAndSlot({
       client: { ...baseClient, async getAvailableDates() { return []; } },
       context,
-      dateWindow,
+    preferences: { window: dateWindow },
     }),
     VisaNoDatesAvailableError,
   );
@@ -241,7 +243,7 @@ test("API hunt distinguishes no acceptable dates from dates without slots", asyn
         async getAvailableDates() { return ["2026-10-04"]; },
       },
       context,
-      dateWindow,
+    preferences: { window: dateWindow },
     }),
     VisaNoSlotsAvailableError,
   );
@@ -272,10 +274,12 @@ test("API hunt ignores dates returned outside the active month range", async () 
       },
     },
     context: { availability: {}, appointment: {} },
-    dateWindow: {
-      minDate: "2026-10-01",
-      maxDate: "2026-11-30",
-      source: "absolute",
+    preferences: {
+      window: {
+        minDate: "2026-10-01",
+        maxDate: "2026-11-30",
+        source: "absolute",
+      },
     },
   });
 
