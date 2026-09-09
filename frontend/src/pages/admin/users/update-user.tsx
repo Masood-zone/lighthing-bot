@@ -307,9 +307,9 @@ export default function UpsertUserDialog(props: {
                           <SelectItem value="dom" className="cursor-pointer">
                             Browser
                           </SelectItem>
-                          {/* <SelectItem value="api" className="cursor-pointer">
+                          <SelectItem value="api" className="cursor-pointer">
                             API
-                          </SelectItem> */}
+                          </SelectItem>
                         </SelectContent>
                       </Select>
                     )}
