@@ -60,6 +60,13 @@ function createNetworkCapture() {
       const postData = request.postData();
       const correlation =
         headers["x-correlation-key"] || headers["X-Correlation-Key"] || "";
+      const authorization = headers.authorization || headers.Authorization || "";
+      const refresh =
+        headers.refreshtoken || headers.Refreshtoken || headers.refreshToken || "";
+      const csrf = headers.csrftoken || headers.csrfToken || headers.CsrfToken || "";
+      if (authorization) state.authorizationHeader = normalizeBearer(authorization);
+      if (refresh) state.refreshToken = refresh;
+      if (csrf) state.csrfToken = csrf;
       if (correlation) state.correlationKey = correlation;
       if (headers.referer) state.referer = headers.referer;
       state.requests.push({

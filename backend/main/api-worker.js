@@ -789,6 +789,8 @@ async function main() {
       // Submit only through the authenticated page so the browser supplies its
       // own same-origin cookie, Origin, Referer, and fetch metadata context.
       finalMutationInPage: true,
+      networkState: capture.state,
+      bookingUserId: CONFIG.SESSION_ID,
       logger: (level, payload) => {
         const event = payload?.event || "";
         if (level === "debug" && event === "request_start") return;

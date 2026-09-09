@@ -680,6 +680,37 @@ test("read-only search retries a transient 500 but final mutation is single-shot
   assert.equal(mutationCalls, 1);
 });
 
+test("fresh pending booking uses the observed PUT contract with page-refreshed auth", async () => {
+  const pageRequests = [];
+  let evaluateCall = 0;
+  const page = {
+    async evaluate(_fn, argument) {
+      evaluateCall += 1;
+      if (evaluateCall === 1) return "fresh-browser-token";
+      if (evaluateCall === 2) return "test-agent";
+      if (evaluateCall === 3) return "1";
+      pageRequests.push(argument);
+      return { status: 200, headers: {}, text: "{}" };
+    },
+    async url() {
+      return "https://www.usvisaappt.com/visaapplicantui/home/appointment";
+    },
+  };
+  const client = new VisaApiClient({
+    context: { cookies: async () => [] },
+    page,
+    auth: { platformAuthToken: "stale-token" },
+    networkState: {},
+    finalMutationInPage: true,
+  });
+
+  await client.submitPendingAppointment({ appointmentId: "appointment-1" });
+
+  assert.equal(pageRequests.length, 1);
+  assert.equal(pageRequests[0].requestMethod, "PUT");
+  assert.equal(pageRequests[0].requestHeaders.Authorization, "Bearer fresh-browser-token");
+});
+
 test("verification requires scheduled status and selected slot fields", () => {
   const payload = {
     applicantId: "applicant-1",

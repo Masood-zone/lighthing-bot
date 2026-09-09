@@ -9,6 +9,7 @@ const {
   isRetryableReadError,
 } = require("./errors");
 const {
+  captureVisaSession,
   decodeJwtExp,
   normalizeBearer,
   restoreBrowserAuthToken,
@@ -52,6 +53,8 @@ class VisaApiClient {
     baseUrl = DEFAULT_BASE_URL,
     logger,
     finalMutationInPage = false,
+    networkState,
+    bookingUserId,
   } = {}) {
     this.context = context;
     this.page = page;
@@ -59,6 +62,45 @@ class VisaApiClient {
     this.baseUrl = String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.logger = logger || (() => {});
     this.finalMutationInPage = Boolean(finalMutationInPage);
+    this.networkState = networkState;
+    this.bookingUserId = bookingUserId || this.auth.bookingUserId;
+  }
+
+  async refreshAuthFromPage() {
+    if (!this.page || !this.context) {
+      throw new VisaPlatformUnavailableError(
+        "Browser context is unavailable for final booking authentication refresh",
+      );
+    }
+
+    const freshAuth = await captureVisaSession({
+      page: this.page,
+      context: this.context,
+      networkState: this.networkState,
+      bookingUserId: this.bookingUserId,
+    });
+    const authorization = normalizeBearer(
+      freshAuth.platformAuthToken || freshAuth.authorizationHeader,
+    );
+    if (!authorization) {
+      throw new VisaApiUnauthorizedError(
+        "Browser authentication is unavailable for final booking submission",
+      );
+    }
+
+    this.auth = {
+      ...this.auth,
+      ...freshAuth,
+      authorizationHeader: authorization,
+      refreshToken: freshAuth.refreshToken || this.auth.refreshToken,
+      csrfToken: freshAuth.csrfToken || this.auth.csrfToken,
+      correlationKey: freshAuth.correlationKey || this.auth.correlationKey,
+      referer: freshAuth.referer || this.auth.referer,
+    };
+    this.logger("info", {
+      event: "final_auth_refreshed",
+      transport: "browser-page",
+    });
   }
 
   _headers({ json = true, referer } = {}) {
@@ -295,6 +337,10 @@ class VisaApiClient {
       );
     }
 
+    // Refresh immediately before the single final mutation. This keeps the
+    // worker's explicit API headers aligned with the active browser session.
+    await this.refreshAuthFromPage();
+
     const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
     const op = operation || `${method} ${path}`;
     const startedAt = Date.now();
@@ -494,13 +540,13 @@ class VisaApiClient {
   async submitPendingAppointment(payload) {
     if (this.finalMutationInPage) {
       return this.requestInPage(
-        "POST",
+        "PUT",
         "/visaappointmentapi/appointments/schedule/group",
         { data: payload, operation: "submitPendingAppointment" },
       );
     }
     return this.request(
-      "POST",
+      "PUT",
       "/visaappointmentapi/appointments/schedule/group",
       {
         data: payload,
