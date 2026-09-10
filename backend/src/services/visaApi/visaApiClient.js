@@ -604,13 +604,13 @@ class VisaApiClient {
     if (this.finalMutationInPage) {
       return this.requestInPage(
         "PUT",
-        "/visaappointmentapi/appointments/schedule/group",
+        "/visaappointmentapi/appointments/reschedule",
         { data: mutationBody, operation: "submitRescheduleAppointment" },
       );
     }
     return this.request(
       "PUT",
-      "/visaappointmentapi/appointments/schedule/group",
+      "/visaappointmentapi/appointments/reschedule",
       {
         data: mutationBody,
         operation: "submitRescheduleAppointment",

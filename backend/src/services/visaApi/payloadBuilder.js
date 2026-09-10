@@ -9,7 +9,12 @@ function required(value, name) {
   return value;
 }
 
-function buildAppointmentPayload({ appointment, selectedDate, selectedSlot }) {
+function buildAppointmentPayload({
+  appointment,
+  selectedDate,
+  selectedSlot,
+  mode = "pending",
+}) {
   const appointmentDt = platformDateTime(selectedDate);
   const appointmentTime = formatAppointmentTime(selectedSlot?.startTime);
 
@@ -20,7 +25,7 @@ function buildAppointmentPayload({ appointment, selectedDate, selectedSlot }) {
     throw new VisaApiContractError("Selected slot startTime is invalid");
   }
 
-  return {
+  const payload = {
     applicantId: required(appointment?.applicantId, "applicantId"),
     applicantUUID: appointment?.applicantUUID ?? null,
     applicationId: required(appointment?.applicationId, "applicationId"),
@@ -35,6 +40,14 @@ function buildAppointmentPayload({ appointment, selectedDate, selectedSlot }) {
     postUserId: required(appointment?.postUserId, "postUserId"),
     slotId: required(selectedSlot?.slotId, "slotId"),
   };
+
+  // AVITS treats a reschedule as a replacement of an existing POST appointment.
+  // The final /appointments/reschedule contract requires this separate field.
+  if (mode === "reschedule") {
+    payload.rescheduleType = payload.appointmentLocationType;
+  }
+
+  return payload;
 }
 
 function fingerprintAttempt({ accountId, payload }) {
@@ -45,6 +58,7 @@ function fingerprintAttempt({ accountId, payload }) {
     slotId: payload.slotId,
     appointmentDt: payload.appointmentDt,
     appointmentTime: payload.appointmentTime,
+    rescheduleType: payload.rescheduleType || null,
   };
 }
 

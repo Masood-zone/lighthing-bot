@@ -389,6 +389,19 @@ test("booking payload is built from appointment and slot fields", () => {
     postUserId: "post-user-1",
     slotId: "slot-1",
   });
+
+  assert.deepEqual(
+    buildAppointmentPayload({
+      selectedDate: "2027-06-10",
+      selectedSlot: { slotId: "slot-1", startTime: "2027-06-10T10:00:00.000+00:00" },
+      appointment: {
+        applicantId: "applicant-1", applicantUUID: null, applicationId: "application-1",
+        appointmentId: "appointment-1", appointmentLocationType: "POST", postUserId: "post-user-1",
+      },
+      mode: "reschedule",
+    }).rescheduleType,
+    "POST",
+  );
 });
 
 test("availability context can force the selected Accra post user id", () => {
@@ -724,8 +737,8 @@ test("pending and reschedule mutations both send one-item arrays", async () => {
   const client = new VisaApiClient({
     context: {
       request: {
-        async fetch(_url, options) {
-          requests.push(options);
+        async fetch(url, options) {
+          requests.push({ url, ...options });
           return response;
         },
       },
@@ -737,6 +750,10 @@ test("pending and reschedule mutations both send one-item arrays", async () => {
   await client.submitRescheduleAppointment({ appointmentId: "scheduled-1" });
 
   assert.deepEqual(requests.map(({ method }) => method), ["PUT", "PUT"]);
+  assert.deepEqual(requests.map(({ url }) => url), [
+    "https://www.usvisaappt.com/visaappointmentapi/appointments/schedule/group",
+    "https://www.usvisaappt.com/visaappointmentapi/appointments/reschedule",
+  ]);
   assert.deepEqual(requests.map(({ data }) => JSON.parse(data)), [
     [{ appointmentId: "pending-1" }],
     [{ appointmentId: "scheduled-1" }],
@@ -811,6 +828,29 @@ test("verification requires scheduled status, identity, date, and time", () => {
       payload,
     ),
     true,
+  );
+});
+
+test("reschedule verification accepts the replacement appointment identity only", () => {
+  const payload = {
+    applicantId: "applicant-1", applicationId: "application-1", appointmentId: "old-appointment-1",
+    appointmentDt: "2027-06-10T00:00:00.000+00:00", appointmentTime: "10:00 AM", slotId: "selected-slot",
+  };
+  const replacement = {
+    ...payload,
+    appointmentId: "replacement-appointment-1",
+    appointmentStatus: "RESCHEDULED",
+    slotId: "server-replacement-slot",
+  };
+
+  assert.equal(appointmentMatchesSubmission(replacement, payload, { mode: "reschedule" }), true);
+  assert.equal(
+    appointmentMatchesSubmission({ ...replacement, appointmentStatus: "SCHEDULED" }, payload, { mode: "reschedule" }),
+    false,
+  );
+  assert.equal(
+    appointmentMatchesSubmission({ ...replacement, appointmentDt: "2027-06-11T00:00:00.000+00:00" }, payload, { mode: "reschedule" }),
+    false,
   );
 });
 

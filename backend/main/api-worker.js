@@ -651,10 +651,12 @@ async function findDateAndSlot({ client, context, preferences: overrides }) {
 }
 
 async function submitAndVerify({ client, context, selectedDate, selectedSlot }) {
+  const submissionMode = CONFIG.RESCHEDULE ? "reschedule" : "pending";
   const payload = buildAppointmentPayload({
     appointment: context.appointment,
     selectedDate,
     selectedSlot,
+    mode: submissionMode,
   });
   const attempt = fingerprintAttempt({
     accountId: CONFIG.USER_EMAIL || CONFIG.SESSION_ID,
@@ -689,7 +691,7 @@ async function submitAndVerify({ client, context, selectedDate, selectedSlot }) 
       : [];
   const finalVerified =
     finalRecords.find((appointment) =>
-      appointmentMatchesSubmission(appointment, payload),
+      appointmentMatchesSubmission(appointment, payload, { mode: submissionMode }),
     ) || null;
   if (finalVerified) {
     status(
@@ -710,7 +712,7 @@ async function submitAndVerify({ client, context, selectedDate, selectedSlot }) 
       return [];
     });
   const searchedMatch = appointments.find((appointment) =>
-    appointmentMatchesSubmission(appointment, payload),
+    appointmentMatchesSubmission(appointment, payload, { mode: submissionMode }),
   );
   if (searchedMatch) {
     return { payload, appointment: searchedMatch, finalResponse };
