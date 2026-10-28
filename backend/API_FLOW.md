@@ -141,12 +141,13 @@ Set `VISA_PERF_TRACE=1` to log per-step timings, including
 
 ## Faster sign-in
 
-The worker still opens Chrome and fills in the applicant's email and password.
-A person must solve the CAPTCHA; the worker never solves or bypasses it.
+The worker opens Chrome, fills in the applicant's email and password, and
+clicks Sign In. If the portal shows a CAPTCHA, the worker waits for a person to
+solve it before clicking; it never solves or bypasses one.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `VISA_AUTO_SUBMIT_LOGIN` | on (`0` disables) | Clicks Sign In once per solved CAPTCHA |
+| `VISA_AUTO_SUBMIT_LOGIN` | on (`0` disables) | Clicks Sign In once after filling credentials (after the CAPTCHA, if one is shown) |
 | `VISA_RESTORE_SESSION` | on (`0` disables) | Reuses a saved, still-valid portal session so a restart skips login |
 | `VISA_DEBUG_HTTP` | off (`1` enables) | Logs the request and response body of failed platform calls (local debugging only) |
 

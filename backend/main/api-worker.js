@@ -355,7 +355,7 @@ async function waitForLoginOrDashboard(page, timeoutMs = CONFIG.LOGIN_WAIT_TIMEO
 
     // eslint-disable-next-line no-await-in-loop
     if (autoSubmit && (await autoSubmit())) {
-      status("LOGIN_SUBMITTED", "CAPTCHA solved; Sign In clicked automatically");
+      status("LOGIN_SUBMITTED", "Sign In clicked automatically");
     }
 
     if (CONFIG.USER_DISPLAY_NAME) {
@@ -417,7 +417,7 @@ async function login(page) {
   status(
     "WAITING_FOR_CAPTCHA",
     CONFIG.AUTO_SUBMIT_LOGIN
-      ? "Credentials filled; complete the CAPTCHA (Sign In is clicked automatically)"
+      ? "Credentials filled; signing in automatically"
       : "Credentials filled; complete CAPTCHA and sign in",
   );
   await waitForLoginOrDashboard(page);

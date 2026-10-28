@@ -146,8 +146,25 @@ test("seeded sessionStorage is applied once per tab and never overwrites", async
   }
 });
 
+test("with no CAPTCHA on the form Sign In is clicked once, straight away", async () => {
+  let clicks = 0;
+  const submit = createLoginAutoSubmitter(
+    {},
+    {
+      readToken: async () => "none",
+      click: async () => {
+        clicks += 1;
+        return true;
+      },
+    },
+  );
+  assert.equal(await submit(), true);
+  assert.equal(await submit(), false, "a failed login is not resubmitted");
+  assert.equal(clicks, 1);
+});
+
 test("Sign In is clicked once per solved CAPTCHA token", async () => {
-  let token = "";
+  let token = "pending";
   let clicks = 0;
   const submit = createLoginAutoSubmitter(
     {},

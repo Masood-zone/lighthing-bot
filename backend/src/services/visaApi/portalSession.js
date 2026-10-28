@@ -117,8 +117,8 @@ async function seedPortalSessionStorage(context, saved) {
   );
 }
 
-// The reCAPTCHA widget writes its response token into this textarea once the
-// person has solved the challenge.
+// Returns "none" when the login form shows no CAPTCHA, "pending" while one is
+// shown but unsolved, or the response token once a person has solved it.
 async function readCaptchaToken(page) {
   return page
     .evaluate(() => {
@@ -126,9 +126,11 @@ async function readCaptchaToken(page) {
       for (const field of fields) {
         if (field.value && field.value.length > 20) return field.value;
       }
-      return "";
+      const widget = document.querySelector('iframe[src*="recaptcha"][title]');
+      const visible = widget && widget.getBoundingClientRect().height > 0;
+      return visible || fields.length ? "pending" : "none";
     })
-    .catch(() => "");
+    .catch(() => "pending");
 }
 
 async function clickSignIn(page) {
@@ -150,13 +152,15 @@ async function clickSignIn(page) {
   return false;
 }
 
-// Clicks Sign In once per solved CAPTCHA. A new token (the person re-solved an
-// expired challenge) allows one more click; the same token never clicks twice.
+// Clicks Sign In once the credentials are filled. With no CAPTCHA on the form
+// it clicks straight away; if the portal shows one, it waits for a person to
+// solve it. Each state is submitted at most once, so a failed login is never
+// retried with the same form.
 function createLoginAutoSubmitter(page, { readToken = readCaptchaToken, click = clickSignIn } = {}) {
   let submittedToken = "";
   return async () => {
     const token = await readToken(page);
-    if (!token || token === submittedToken) return false;
+    if (!token || token === "pending" || token === submittedToken) return false;
     const clicked = await click(page).catch(() => false);
     if (clicked) submittedToken = token;
     return clicked;
