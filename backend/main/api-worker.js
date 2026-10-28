@@ -470,14 +470,19 @@ async function tryRestoreSavedSession({ page, context, networkState }) {
   }
 
   await seedPortalSessionStorage(context, saved);
+  const navStartedAt = Date.now();
   await page
     .goto(`${getAppBaseUrl()}/dashboard`, {
       waitUntil: "domcontentloaded",
       timeout: CONFIG.LOGIN_NAV_TIMEOUT_MS,
     })
     .catch(() => {});
+  const navMs = Date.now() - navStartedAt;
   if (!(await dashboardStaysAuthenticated(page, CONFIG.RESTORE_CHECK_MS))) {
-    log("info", "Portal did not accept the saved session in the browser; signing in");
+    log(
+      "info",
+      `Portal did not accept the saved session in the browser; signing in (navMs=${navMs} url=${page.url().split("?")[0]})`,
+    );
     await clearPortalSession(CONFIG.PROFILE_DIR);
     return null;
   }
@@ -529,6 +534,7 @@ async function establishApiSession({ page, context, networkState, allowRestore =
           "Platform auth token was not captured from sessionStorage or headers",
         );
       }
+      log("info", `Authenticated page: ${String(auth.storageUrl || "").split("?")[0]}`);
       return auth;
     } catch (error) {
       if (page.isClosed()) throw error;
