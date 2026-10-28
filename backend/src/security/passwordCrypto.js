@@ -107,6 +107,8 @@ function isSecretConfigured() {
 }
 
 module.exports = {
+  encryptSecret,
+  decryptSecret,
   encryptPassword,
   decryptPassword,
   encryptProxyUrl,

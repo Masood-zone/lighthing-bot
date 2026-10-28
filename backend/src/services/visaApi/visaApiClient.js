@@ -406,6 +406,16 @@ class VisaApiClient {
             status,
             attempt,
           });
+          if (process.env.VISA_DEBUG_HTTP === "1") {
+            this.logger("warn", {
+              operation: op,
+              event: "request_failed_detail",
+              method,
+              url,
+              requestBody: data === undefined ? null : JSON.stringify(data).slice(0, 1000),
+              responseBody: String(text).slice(0, 1500),
+            });
+          }
           throw error;
         }
 
@@ -603,9 +613,10 @@ class VisaApiClient {
     return body;
   }
 
-  async getAuthenticatedUser() {
+  async getAuthenticatedUser(options = {}) {
     return this.request("GET", "/visauserapi/portal/getuser", {
       operation: "getAuthenticatedUser",
+      ...options,
     });
   }
 

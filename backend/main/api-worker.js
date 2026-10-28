@@ -46,6 +46,11 @@ const {
   shouldRunContextBootstrap,
   parseIsoDateOnly,
   redact,
+  savePortalSession,
+  loadPortalSession,
+  clearPortalSession,
+  seedPortalSessionStorage,
+  createLoginAutoSubmitter,
 } = require("../src/services/visaApi");
 
 const CONFIG = {
@@ -139,6 +144,11 @@ const CONFIG = {
     200,
     Number(process.env.VISA_SLOW_CONNECTION_MS) || 1200,
   ),
+  // Click Sign In as soon as the person has solved the CAPTCHA.
+  AUTO_SUBMIT_LOGIN: process.env.VISA_AUTO_SUBMIT_LOGIN !== "0",
+  // Reuse a still-valid portal session saved by an earlier run.
+  RESTORE_SESSION: process.env.VISA_RESTORE_SESSION !== "0",
+  RESTORE_CHECK_MS: 5000,
 };
 
 // Hot-path reads fail fast: the next scheduled scan is the retry.
@@ -339,8 +349,14 @@ async function waitForLoginSurface(page, timeoutMs = CONFIG.LOGIN_WAIT_TIMEOUT_M
 
 async function waitForLoginOrDashboard(page, timeoutMs = CONFIG.LOGIN_WAIT_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
+  const autoSubmit = CONFIG.AUTO_SUBMIT_LOGIN ? createLoginAutoSubmitter(page) : null;
   while (Date.now() < deadline) {
     if (/dashboard/i.test(page.url())) return;
+
+    // eslint-disable-next-line no-await-in-loop
+    if (autoSubmit && (await autoSubmit())) {
+      status("LOGIN_SUBMITTED", "CAPTCHA solved; Sign In clicked automatically");
+    }
 
     if (CONFIG.USER_DISPLAY_NAME) {
       // eslint-disable-next-line no-await-in-loop
@@ -398,7 +414,12 @@ async function login(page) {
       .fill(CONFIG.USER_PASSWORD, { timeout: 30000 });
   }
 
-  status("WAITING_FOR_CAPTCHA", "Credentials filled; complete CAPTCHA and sign in");
+  status(
+    "WAITING_FOR_CAPTCHA",
+    CONFIG.AUTO_SUBMIT_LOGIN
+      ? "Credentials filled; complete the CAPTCHA (Sign In is clicked automatically)"
+      : "Credentials filled; complete CAPTCHA and sign in",
+  );
   await waitForLoginOrDashboard(page);
   status("SESSION_CAPTURED", "Dashboard authenticated");
 }
@@ -410,7 +431,86 @@ async function openDashboard(page) {
   await page.waitForURL(/dashboard/i, { timeout: 20000 }).catch(() => {});
 }
 
-async function establishApiSession({ page, context, networkState }) {
+// Waits for the dashboard to settle: navigating straight to /dashboard puts it
+// in the URL even when the portal is about to redirect back to login.
+async function dashboardStaysAuthenticated(page, timeoutMs) {
+  const loginShown = await page
+    .locator('input[formcontrolname="username"]')
+    .first()
+    .waitFor({ state: "visible", timeout: timeoutMs })
+    .then(() => true)
+    .catch(() => false);
+  return !loginShown && /dashboard/i.test(page.url());
+}
+
+async function tryRestoreSavedSession({ page, context, networkState }) {
+  if (!CONFIG.RESTORE_SESSION || !CONFIG.PROFILE_DIR) return null;
+  const saved = await loadPortalSession({
+    profileDir: CONFIG.PROFILE_DIR,
+    minRemainingMs: CONFIG.TOKEN_REFRESH_LEAD_MS,
+  });
+  if (!saved) return null;
+
+  status("SESSION_RESTORING", "Checking saved portal session");
+  const probe = new VisaApiClient({
+    context,
+    auth: saved.auth,
+    baseUrl: getBaseUrl(),
+    readTransport: "playwright",
+  });
+  try {
+    await probe.getAuthenticatedUser({
+      maxAttempts: 1,
+      timeoutMs: CONFIG.RESTORE_CHECK_MS,
+    });
+  } catch (error) {
+    log("info", `Saved portal session not accepted; signing in: ${formatApiError(error)}`);
+    await clearPortalSession(CONFIG.PROFILE_DIR);
+    return null;
+  }
+
+  await seedPortalSessionStorage(context, saved);
+  await page
+    .goto(`${getAppBaseUrl()}/dashboard`, {
+      waitUntil: "domcontentloaded",
+      timeout: CONFIG.LOGIN_NAV_TIMEOUT_MS,
+    })
+    .catch(() => {});
+  if (!(await dashboardStaysAuthenticated(page, CONFIG.RESTORE_CHECK_MS))) {
+    log("info", "Portal did not accept the saved session in the browser; signing in");
+    await clearPortalSession(CONFIG.PROFILE_DIR);
+    return null;
+  }
+
+  const auth = await captureVisaSession({
+    page,
+    context,
+    networkState,
+    bookingUserId: CONFIG.SESSION_ID,
+  });
+  if (!auth.authorizationHeader) return null;
+  status("SESSION_CAPTURED", "Saved portal session restored; login skipped");
+  return auth;
+}
+
+function persistPortalSession(page, auth) {
+  if (!CONFIG.RESTORE_SESSION || !CONFIG.PROFILE_DIR) return;
+  savePortalSession({ profileDir: CONFIG.PROFILE_DIR, page, auth }).catch((error) => {
+    log("warn", `Could not save portal session: ${error.message}`);
+  });
+}
+
+async function establishApiSession({ page, context, networkState, allowRestore = false }) {
+  if (allowRestore) {
+    const restored = await tryRestoreSavedSession({ page, context, networkState }).catch(
+      (error) => {
+        log("warn", `Saved session restore failed: ${error.message}`);
+        return null;
+      },
+    );
+    if (restored) return restored;
+  }
+
   let attempt = 0;
   while (true) {
     attempt += 1;
@@ -939,6 +1039,7 @@ function createBackgroundTokenRefresher(client) {
       .then(() => {
         if (client.auth.tokenExpiresAt !== previousExpiry) {
           status("SESSION_REFRESHED", "Platform token refreshed in background");
+          persistPortalSession(client.page, client.auth);
         }
       })
       .catch((error) => {
@@ -988,7 +1089,9 @@ async function main() {
       page,
       context,
       networkState: capture.state,
+      allowRestore: true,
     });
+    persistPortalSession(page, auth);
 
     client = new VisaApiClient({
       context,
@@ -1121,6 +1224,7 @@ async function main() {
             networkState: capture.state,
           });
           client.auth = auth;
+          persistPortalSession(page, auth);
           resolvedContext = null;
           bootstrapCache = {
             user: null,
