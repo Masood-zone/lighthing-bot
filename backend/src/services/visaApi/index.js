@@ -10,4 +10,5 @@ module.exports = {
   ...require("./contextBootstrap"),
   ...require("./visaApiClient"),
   ...require("./scanScheduler"),
+  ...require("./portalSession"),
 };

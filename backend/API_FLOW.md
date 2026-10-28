@@ -138,3 +138,22 @@ Backoff: network errors and 5xx wait 1, 2, 4, 8, then 15 s. A 429 honors
 The final booking request is still sent once per slot and never replayed.
 Set `VISA_PERF_TRACE=1` to log per-step timings, including
 `availability_seen_to_booking_sent`.
+
+## Faster sign-in
+
+The worker opens Chrome, fills in the applicant's email and password, and
+clicks Sign In. If the portal shows a CAPTCHA, the worker waits for a person to
+solve it before clicking; it never solves or bypasses one.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `VISA_AUTO_SUBMIT_LOGIN` | on (`0` disables) | Clicks Sign In once after filling credentials (after the CAPTCHA, if one is shown) |
+| `VISA_RESTORE_SESSION` | on (`0` disables) | Reuses a saved, still-valid portal session so a restart skips login |
+| `VISA_DEBUG_HTTP` | off (`1` enables) | Logs the request and response body of failed platform calls (local debugging only) |
+
+After a successful login, and after each background token refresh, the worker
+saves the portal's sessionStorage and auth headers to `portal-session.json` in
+the user's Chrome profile directory. The file is encrypted with
+`VISA_SECRET_KEY`. On the next start the token is checked with a read-only
+`getuser` call; if it has expired, is rejected, or the dashboard redirects to
+login, the file is deleted and the normal login runs.
