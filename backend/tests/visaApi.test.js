@@ -205,9 +205,9 @@ test("API hunt scans months and dates sequentially until a later month succeeds"
     "first",
     "dates:2026-10-01",
     "dates:2026-11-01",
+    "dates:2026-12-01",
     "slots:2026-11-04:2026-11-01:2026-11-30",
     "slots:2026-11-08:2026-11-01:2026-11-30",
-    "dates:2026-12-01",
     "slots:2026-12-02:2026-12-01:2026-12-31",
   ]);
 });

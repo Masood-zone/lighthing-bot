@@ -25,28 +25,34 @@ function isUsableSlot(slot) {
   return Boolean(parseSlotStart(slot.startTime));
 }
 
-function selectEarliestUsableSlot(slots) {
-  if (!Array.isArray(slots)) {
-    return { selectedSlot: null, reason: "slots_not_array" };
-  }
-
-  const usable = slots
+function listUsableSlots(slots) {
+  if (!Array.isArray(slots)) return [];
+  return slots
     .filter(isUsableSlot)
     .map((slot) => ({
       slot,
       start: parseSlotStart(slot.startTime).getTime(),
     }))
-    .sort((a, b) => a.start - b.start);
+    .sort((a, b) => a.start - b.start)
+    .map(({ slot }) => slot);
+}
 
+function selectEarliestUsableSlot(slots) {
+  if (!Array.isArray(slots)) {
+    return { selectedSlot: null, reason: "slots_not_array" };
+  }
+
+  const usable = listUsableSlots(slots);
   if (!usable.length) {
     return { selectedSlot: null, reason: "no_usable_slots" };
   }
 
-  return { selectedSlot: usable[0].slot, reason: "earliest_usable_slot" };
+  return { selectedSlot: usable[0], reason: "earliest_usable_slot" };
 }
 
 module.exports = {
   formatAppointmentTime,
   isUsableSlot,
+  listUsableSlots,
   selectEarliestUsableSlot,
 };
