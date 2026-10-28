@@ -32,7 +32,10 @@ const {
   monthRangeFor,
   buildMonthScanPlan,
   formatAppointmentTime,
-  selectEarliestUsableSlot,
+  listUsableSlots,
+  createScanScheduler,
+  createScanStats,
+  mapInBatches,
   buildAppointmentPayload,
   fingerprintAttempt,
   appointmentMatchesSubmission,
@@ -99,6 +102,54 @@ const CONFIG = {
     process.env.VISA_SELECTED_POST_USER_ID || process.env.VISA_POST_USER_ID || "483",
   ),
   PERF_TRACE: isPerfTraceEnabled(process.env.VISA_PERF_TRACE),
+  FIRST_MONTH_POLL_MS: Math.max(
+    250,
+    Number(process.env.VISA_FIRST_MONTH_POLL_MS) || 750,
+  ),
+  SCAN_JITTER_MS: Math.max(0, Number(process.env.VISA_SCAN_JITTER_MS) || 100),
+  SCAN_TIMEOUT_MS: Math.max(
+    1000,
+    Number(process.env.VISA_SCAN_TIMEOUT_MS) || 4000,
+  ),
+  HEARTBEAT_MS: Math.max(
+    1000,
+    Number(process.env.VISA_HEARTBEAT_MS) || 10_000,
+  ),
+  DATE_LOOKUP_CONCURRENCY: Math.max(
+    1,
+    Number(process.env.VISA_DATE_LOOKUP_CONCURRENCY) || 3,
+  ),
+  API_MAX_MONTHS: Math.max(1, Number(process.env.VISA_API_MAX_MONTHS) || 12),
+  SLOT_LOOKUP_CONCURRENCY: Math.max(
+    1,
+    Number(process.env.VISA_SLOT_LOOKUP_CONCURRENCY) || 2,
+  ),
+  CONFLICT_FALLBACK_LIMIT: Math.max(
+    0,
+    Number(process.env.VISA_CONFLICT_FALLBACK_LIMIT ?? 2) || 0,
+  ),
+  // auto = direct keep-alive HTTP for reads when no proxy is configured,
+  // otherwise Playwright so reads keep using the browser's proxy.
+  READ_TRANSPORT: String(process.env.VISA_READ_TRANSPORT || "auto").toLowerCase(),
+  TOKEN_REFRESH_LEAD_MS: Math.max(
+    60_000,
+    Number(process.env.VISA_TOKEN_REFRESH_LEAD_MS) || 120_000,
+  ),
+  SLOW_CONNECTION_MS: Math.max(
+    200,
+    Number(process.env.VISA_SLOW_CONNECTION_MS) || 1200,
+  ),
+};
+
+// Hot-path reads fail fast: the next scheduled scan is the retry.
+const SCAN_REQUEST_OPTIONS = {
+  maxAttempts: 1,
+  timeoutMs: CONFIG.SCAN_TIMEOUT_MS,
+};
+const LOOKUP_REQUEST_OPTIONS = {
+  maxAttempts: 2,
+  retryDelaysMs: [150],
+  timeoutMs: CONFIG.SCAN_TIMEOUT_MS,
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -541,7 +592,82 @@ function chooseNextDateCandidate({
   });
 }
 
-async function findDateAndSlot({ client, context, preferences: overrides }) {
+// Every acceptable date in a month, in the order the date rules prefer them.
+function orderDateCandidates({
+  dates,
+  window,
+  currentAppointmentDate,
+  preferences,
+}) {
+  const ordered = [];
+  const tried = new Set();
+  while (tried.size < dates.length) {
+    const selection = chooseNextDateCandidate({
+      dates: dates.filter((date) => !tried.has(date)),
+      window,
+      currentAppointmentDate,
+      preferences,
+    });
+    if (!selection.selectedDate) break;
+    tried.add(selection.selectedDate);
+    ordered.push(selection.selectedDate);
+  }
+  return ordered;
+}
+
+// Fetches slot times for candidate dates in parallel batches and picks the
+// most preferred date's earliest slot, regardless of which response arrived
+// first. Other usable slots from the fetched dates become conflict fallbacks.
+async function findSlotForCandidates({ client, context, candidates }) {
+  const lookups = await mapInBatches(
+    candidates,
+    CONFIG.SLOT_LOOKUP_CONCURRENCY,
+    async (selectedDate) => {
+      const slotLookupRange = monthRangeFor(selectedDate);
+      const slotsStartedAt = startPerfTrace();
+      const slots = await client.getAvailableTimeSlots(
+        context.availability,
+        {
+          slotDate: selectedDate,
+          fromDate: slotLookupRange.fromDate,
+          toDate: slotLookupRange.toDate,
+        },
+        LOOKUP_REQUEST_OPTIONS,
+      );
+      perfTrace("getAvailableTimeSlots", slotsStartedAt, {
+        slotDate: selectedDate,
+      });
+      return { selectedDate, usableSlots: listUsableSlots(slots) };
+    },
+    { stopWhen: (batch) => batch.some((lookup) => lookup.usableSlots.length) },
+  );
+
+  const options = [];
+  for (const { selectedDate, usableSlots } of lookups) {
+    for (const selectedSlot of usableSlots) {
+      options.push({ selectedDate, selectedSlot });
+    }
+  }
+  if (!options.length) return null;
+
+  const [best, ...rest] = options;
+  status("DATE_SELECTED", best.selectedDate);
+  status(
+    "SLOT_SELECTED",
+    `Time slot selected: ${formatAppointmentTime(best.selectedSlot.startTime)}`,
+  );
+  return {
+    ...best,
+    fallbacks: rest.slice(0, CONFIG.CONFLICT_FALLBACK_LIMIT),
+  };
+}
+
+async function findDateAndSlot({
+  client,
+  context,
+  preferences: overrides,
+  scanStats,
+}) {
   const perfStartedAt = startPerfTrace();
   try {
     const window = overrides?.window || getDatePreferencesSnapshot();
@@ -557,19 +683,28 @@ async function findDateAndSlot({ client, context, preferences: overrides }) {
       context.appointment.appointmentDt,
     );
 
-    status("SCANNING_DATES", "Checking first available appointment month");
-    const firstMonthStartedAt = startPerfTrace();
-    const firstMonth = await client.getFirstAvailableMonth(context.availability);
+    const firstMonthStartedAt = Date.now();
+    const firstMonth = await client.getFirstAvailableMonth(
+      context.availability,
+      SCAN_REQUEST_OPTIONS,
+    );
     perfTrace("getFirstAvailableMonth", firstMonthStartedAt);
+    scanStats?.recordScan({
+      latencyMs: Date.now() - firstMonthStartedAt,
+      firstAvailableDate: firstMonth?.date || null,
+    });
     if (!firstMonth?.present || !firstMonth?.date) {
       throw new VisaNoDatesAvailableError("No first available month returned");
     }
+    const availabilitySeenAt = Date.now();
 
+    // Months outside the window produce an empty plan, so no date calls are
+    // made for them.
     const ranges = buildMonthScanPlan({
       firstAvailableDate: firstMonth.date,
       minDate: window.minDate,
       maxDate: window.maxDate,
-    });
+    }).slice(0, CONFIG.API_MAX_MONTHS);
     if (!ranges.length) {
       throw new VisaNoDatesAvailableError(
         "First available month is outside the configured date window",
@@ -577,63 +712,56 @@ async function findDateAndSlot({ client, context, preferences: overrides }) {
     }
 
     let acceptableDateFound = false;
-    for (const range of ranges) {
+    const fetchDates = async (range) => {
       const availableDatesStartedAt = startPerfTrace();
-      // eslint-disable-next-line no-await-in-loop
       const rawDates = await client.getAvailableDates(
         context.availability,
         range,
+        LOOKUP_REQUEST_OPTIONS,
       );
       perfTrace("getAvailableDates", availableDatesStartedAt, { range });
-      const availableDates = normalizeAvailableDates(rawDates).filter(
-        (date) => date >= range.fromDate && date <= range.toDate,
-      );
-      const tried = new Set();
+      return {
+        range,
+        availableDates: normalizeAvailableDates(rawDates).filter(
+          (date) => date >= range.fromDate && date <= range.toDate,
+        ),
+      };
+    };
 
-      while (tried.size < availableDates.length) {
-        const selection = chooseNextDateCandidate({
-          dates: availableDates.filter((date) => !tried.has(date)),
+    // Month lookups run in parallel batches, but each batch is evaluated in
+    // chronological order so the earliest acceptable month always wins.
+    for (
+      let index = 0;
+      index < ranges.length;
+      index += CONFIG.DATE_LOOKUP_CONCURRENCY
+    ) {
+      // eslint-disable-next-line no-await-in-loop
+      const months = await Promise.all(
+        ranges
+          .slice(index, index + CONFIG.DATE_LOOKUP_CONCURRENCY)
+          .map(fetchDates),
+      );
+
+      for (const { range, availableDates } of months) {
+        const candidates = orderDateCandidates({
+          dates: availableDates,
           window,
           currentAppointmentDate,
           preferences,
         });
-        if (!selection.selectedDate) break;
-
+        if (!candidates.length) continue;
         acceptableDateFound = true;
-        const selectedDate = selection.selectedDate;
-        tried.add(selectedDate);
-        status("DATE_SELECTED", selectedDate);
-        status("FETCHING_SLOTS", `Fetching slots for ${selectedDate}`);
 
-        const slotLookupRange = monthRangeFor(selectedDate);
-        const slotsStartedAt = startPerfTrace();
         // eslint-disable-next-line no-await-in-loop
-        const slots = await client.getAvailableTimeSlots(context.availability, {
-          slotDate: selectedDate,
-          fromDate: slotLookupRange.fromDate,
-          toDate: slotLookupRange.toDate,
+        const found = await findSlotForCandidates({
+          client,
+          context,
+          candidates,
         });
-        perfTrace("getAvailableTimeSlots", slotsStartedAt, {
-          slotDate: selectedDate,
-        });
-
-        const slotSelection = selectEarliestUsableSlot(slots);
-        if (!slotSelection.selectedSlot) {
-          status("NO_SLOTS_AVAILABLE", `No usable slots for ${selectedDate}`);
-          continue;
+        if (found) {
+          perfTrace("availability_seen_to_slot_selected", availabilitySeenAt);
+          return { ...found, searchRange: range, availabilitySeenAt };
         }
-
-        status(
-          "SLOT_SELECTED",
-          `Time slot selected: ${formatAppointmentTime(
-            slotSelection.selectedSlot.startTime,
-          )}`,
-        );
-        return {
-          selectedDate,
-          selectedSlot: slotSelection.selectedSlot,
-          searchRange: range,
-        };
       }
     }
 
@@ -735,24 +863,99 @@ async function submitAndVerify({ client, context, selectedDate, selectedSlot }) 
   );
 }
 
-async function runApiHuntCycle({ client, context }) {
+async function runApiHuntCycle({ client, context, scanStats }) {
   const perfStartedAt = startPerfTrace();
-  const { selectedDate, selectedSlot } = await findDateAndSlot({
+  const selection = await findDateAndSlot({
     client,
     context,
+    scanStats,
   });
   perfTrace("api_hunt_before_final_submission", perfStartedAt, {
     result: "selection_ready",
   });
-  const verified = await submitAndVerify({
-    client,
-    context,
-    selectedDate,
-    selectedSlot,
-  });
 
-  status("COMPLETED", "API booking verified successfully");
-  return verified;
+  // A 409 means another client took that slot. Each fallback is a different
+  // slot from the same lookup, so no booking request is ever repeated.
+  const candidates = [selection, ...(selection.fallbacks || [])];
+  let lastConflict = null;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const { selectedDate, selectedSlot } = candidates.at(index);
+    if (index > 0) {
+      if (scanStats) scanStats.stats.fallbackAttempts += 1;
+      status(
+        "SLOT_FALLBACK",
+        `Trying fallback ${index} of ${candidates.length - 1}: ${selectedDate} ${formatAppointmentTime(selectedSlot.startTime)}`,
+      );
+    }
+    perfTrace("availability_seen_to_booking_sent", selection.availabilitySeenAt, {
+      attempt: index + 1,
+    });
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const verified = await submitAndVerify({
+        client,
+        context,
+        selectedDate,
+        selectedSlot,
+      });
+      status("COMPLETED", "API booking verified successfully");
+      return verified;
+    } catch (error) {
+      if (!(error instanceof VisaSlotConflictError)) throw error;
+      if (scanStats) scanStats.stats.conflicts += 1;
+      lastConflict = error;
+    }
+  }
+  throw lastConflict;
+}
+
+function emitScanHeartbeat(scanStats, scheduler) {
+  const summary = scanStats.takeHeartbeat(CONFIG.HEARTBEAT_MS);
+  if (!summary) return;
+  const slow =
+    summary.scans && summary.averageLatencyMs > CONFIG.SLOW_CONNECTION_MS
+      ? `; slow connection (over ${CONFIG.SLOW_CONNECTION_MS} ms), check Wi-Fi, VPN or proxy`
+      : "";
+  status(
+    "AVAILABILITY_SCAN_HEARTBEAT",
+    `scans=${summary.scans} avgLatencyMs=${summary.averageLatencyMs} firstAvailable=${summary.lastFirstAvailableDate || "none"} throttle=${scheduler.throttleState} rateLimited=${summary.rateLimited} failures=${summary.failures} conflicts=${summary.conflicts} fallbacks=${summary.fallbackAttempts}${slow}`,
+  );
+}
+
+// Re-reads the token from the page shortly before it expires, without pausing
+// the scan loop. The page's own app refreshes its token, and the API worker
+// also picks up rotated tokens from response headers.
+function createBackgroundTokenRefresher(client) {
+  let inFlight = null;
+  let lastAttemptAt = 0;
+  return () => {
+    if (inFlight) return;
+    if (!tokenExpiresSoon(client.auth, CONFIG.TOKEN_REFRESH_LEAD_MS)) return;
+    if (Date.now() - lastAttemptAt < 15_000) return;
+    lastAttemptAt = Date.now();
+    const previousExpiry = client.auth.tokenExpiresAt;
+    inFlight = client
+      .refreshAuthFromPage()
+      .then(() => {
+        if (client.auth.tokenExpiresAt !== previousExpiry) {
+          status("SESSION_REFRESHED", "Platform token refreshed in background");
+        }
+      })
+      .catch((error) => {
+        log("warn", `Background token refresh failed: ${formatApiError(error)}`);
+      })
+      .finally(() => {
+        inFlight = null;
+      });
+  };
+}
+
+function resolveReadTransport() {
+  if (CONFIG.READ_TRANSPORT === "fetch" || CONFIG.READ_TRANSPORT === "undici") {
+    return "fetch";
+  }
+  if (CONFIG.READ_TRANSPORT === "playwright") return "playwright";
+  return CONFIG.PROXY_URL ? "playwright" : "fetch";
 }
 
 function isRecoverableContextError(error) {
@@ -797,6 +1000,7 @@ async function main() {
       finalMutationInPage: true,
       networkState: capture.state,
       bookingUserId: CONFIG.SESSION_ID,
+      readTransport: resolveReadTransport(),
       logger: (level, payload) => {
         const event = payload?.event || "";
         if (level === "debug" && event === "request_start") return;
@@ -804,10 +1008,24 @@ async function main() {
       },
     });
 
-    status("SESSION_READY", "Authenticated API session ready");
+    status(
+      "SESSION_READY",
+      `Authenticated API session ready; readTransport=${client.readTransport}; pollMs=${CONFIG.FIRST_MONTH_POLL_MS}`,
+    );
+    await client.warmUp();
+
+    const scheduler = createScanScheduler({
+      pollMs: CONFIG.FIRST_MONTH_POLL_MS,
+      jitterMs: CONFIG.SCAN_JITTER_MS,
+    });
+    const scanStats = createScanStats();
+    const refreshTokenInBackground = createBackgroundTokenRefresher(client);
+    let lastScanOutcome = "";
 
     while (!completionReported) {
+      const cycleStartedAt = Date.now();
       try {
+        refreshTokenInBackground();
         if (tokenExpiresSoon(client.auth)) {
           status("SESSION_EXPIRED", "Platform token is near expiration");
           throw new VisaApiUnauthorizedError("Token is near expiration");
@@ -825,29 +1043,37 @@ async function main() {
         await runApiHuntCycle({
           client,
           context: resolvedContext,
+          scanStats,
         });
         completionReported = true;
       } catch (error) {
-        if (error instanceof VisaNoDatesAvailableError) {
-          status("NO_DATES_AVAILABLE", error.message);
-          status("WAITING_NEXT_SCAN", "Waiting before the next API date scan");
-          await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
-          continue;
-        }
-
-        if (error instanceof VisaNoSlotsAvailableError) {
-          status("NO_SLOTS_AVAILABLE", error.message);
-          status("WAITING_NEXT_SCAN", "Waiting before refreshing availability");
-          await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
+        if (
+          error instanceof VisaNoDatesAvailableError ||
+          error instanceof VisaNoSlotsAvailableError
+        ) {
+          // Statuses are written only when the outcome changes; the heartbeat
+          // summarizes the rest so fast scans do not flood the worker pool.
+          const outcome =
+            error instanceof VisaNoDatesAvailableError
+              ? "NO_DATES_AVAILABLE"
+              : "NO_SLOTS_AVAILABLE";
+          if (`${outcome}:${error.message}` !== lastScanOutcome) {
+            status(outcome, error.message);
+            lastScanOutcome = `${outcome}:${error.message}`;
+          }
+          scheduler.onSuccess();
+          emitScanHeartbeat(scanStats, scheduler);
+          await sleep(scheduler.delayUntilNextScan(cycleStartedAt));
           continue;
         }
 
         if (error instanceof VisaSlotConflictError) {
           status(
             "SLOT_CONFLICT",
-            "Selected slot was rejected; refreshing availability before another selection",
+            "Selected slots were taken; rescanning availability immediately",
           );
-          await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
+          lastScanOutcome = "";
+          scheduler.onSuccess();
           continue;
         }
 
@@ -864,18 +1090,26 @@ async function main() {
         }
 
         if (error instanceof VisaApiRateLimitedError) {
-          const waitMs = error.retryAfterMs || CONFIG.ATTEMPT_INTERVAL_MS;
+          scanStats.stats.rateLimited += 1;
+          const waitMs = scheduler.onRateLimited(error.retryAfterMs);
           status(
             "RATE_LIMITED",
             `${formatApiError(error)}; waiting ${Math.ceil(waitMs / 1000)}s`,
           );
+          lastScanOutcome = "";
           await sleep(waitMs);
           continue;
         }
 
         if (error instanceof VisaPlatformUnavailableError) {
-          status("PLATFORM_UNAVAILABLE", formatApiError(error));
-          await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
+          scanStats.stats.failures += 1;
+          const waitMs = scheduler.onFailure();
+          status(
+            "PLATFORM_UNAVAILABLE",
+            `${formatApiError(error)}; retrying in ${(waitMs / 1000).toFixed(1)}s`,
+          );
+          lastScanOutcome = "";
+          await sleep(waitMs);
           continue;
         }
 
@@ -947,6 +1181,7 @@ if (require.main === module) {
 module.exports = {
   findDateAndSlot,
   isPerfTraceEnabled,
+  runApiHuntCycle,
   start,
   submitAndVerify,
 };

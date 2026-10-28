@@ -46,6 +46,45 @@ function parseJsonMaybe(text) {
   }
 }
 
+const SAME_SITE = { strict: "Strict", lax: "Lax", none: "None" };
+
+// Minimal Set-Cookie parser for mirroring cookies set on direct (non-browser)
+// read responses back into the Playwright context, so the browser session and
+// the API session never drift apart.
+function parseSetCookie(header, url) {
+  const [pair, ...attributes] = String(header || "").split(";");
+  const eq = pair.indexOf("=");
+  if (eq <= 0) return null;
+  const cookie = {
+    name: pair.slice(0, eq).trim(),
+    value: pair.slice(eq + 1).trim(),
+    domain: new URL(url).hostname,
+    path: "/",
+    secure: false,
+    httpOnly: false,
+  };
+  for (const attribute of attributes) {
+    const index = attribute.indexOf("=");
+    const key = (index === -1 ? attribute : attribute.slice(0, index))
+      .trim()
+      .toLowerCase();
+    const value = index === -1 ? "" : attribute.slice(index + 1).trim();
+    if (key === "domain" && value) cookie.domain = value;
+    else if (key === "path" && value) cookie.path = value;
+    else if (key === "secure") cookie.secure = true;
+    else if (key === "httponly") cookie.httpOnly = true;
+    else if (key === "samesite" && SAME_SITE[value.toLowerCase()]) {
+      cookie.sameSite = SAME_SITE[value.toLowerCase()];
+    } else if (key === "max-age" && Number.isFinite(Number(value))) {
+      cookie.expires = Math.floor(Date.now() / 1000) + Number(value);
+    } else if (key === "expires" && cookie.expires === undefined) {
+      const expires = Date.parse(value);
+      if (Number.isFinite(expires)) cookie.expires = Math.floor(expires / 1000);
+    }
+  }
+  return cookie;
+}
+
 function providerDiagnostics(body) {
   const value = body && typeof body === "object" && !Array.isArray(body) ? body : {};
   const responseMessage = String(value.responseMessage || "");
@@ -71,6 +110,8 @@ class VisaApiClient {
     finalMutationInPage = false,
     networkState,
     bookingUserId,
+    readTransport = "playwright",
+    fetchImpl = globalThis.fetch,
   } = {}) {
     this.context = context;
     this.page = page;
@@ -80,6 +121,86 @@ class VisaApiClient {
     this.finalMutationInPage = Boolean(finalMutationInPage);
     this.networkState = networkState;
     this.bookingUserId = bookingUserId || this.auth.bookingUserId;
+    // "fetch" sends read-only calls through Node's keep-alive HTTP client using
+    // the browser's cookies; "playwright" uses context.request. Mutations are
+    // unaffected by this setting.
+    this.readTransport =
+      readTransport === "fetch" && typeof fetchImpl === "function"
+        ? "fetch"
+        : "playwright";
+    this.fetchImpl = fetchImpl;
+  }
+
+  // Opens the keep-alive connection before the first scan so it does not pay
+  // for the TCP and TLS handshake.
+  async warmUp() {
+    if (this.readTransport !== "fetch") return;
+    const startedAt = Date.now();
+    try {
+      await this.fetchImpl(`${this.baseUrl}/`, {
+        method: "HEAD",
+        signal: AbortSignal.timeout(5000),
+      });
+      this.logger("info", {
+        event: "connection_warmed",
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      this.logger("warn", {
+        event: "connection_warm_failed",
+        error: String(error?.message || error),
+      });
+    }
+  }
+
+  async _send(url, { method, headers, body, timeoutMs }) {
+    if (this.readTransport !== "fetch") {
+      const response = await this.context.request.fetch(url, {
+        method,
+        headers,
+        data: body,
+        timeout: timeoutMs,
+      });
+      return {
+        status: response.status(),
+        headers: () => response.headers(),
+        text: () => response.text(),
+      };
+    }
+
+    const cookies = this.context
+      ? await this.context.cookies(url).catch(() => [])
+      : [];
+    const requestHeaders = { ...headers };
+    if (cookies.length) {
+      requestHeaders.Cookie = cookies
+        .map((cookie) => `${cookie.name}=${cookie.value}`)
+        .join("; ");
+    }
+    const response = await this.fetchImpl(url, {
+      method,
+      headers: requestHeaders,
+      body,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    const setCookies =
+      typeof response.headers.getSetCookie === "function"
+        ? response.headers.getSetCookie()
+        : [];
+    if (setCookies.length && this.context) {
+      const parsed = setCookies
+        .map((header) => parseSetCookie(header, url))
+        .filter(Boolean);
+      if (parsed.length) await this.context.addCookies(parsed).catch(() => {});
+    }
+
+    const responseHeaders = Object.fromEntries(response.headers.entries());
+    return {
+      status: response.status,
+      headers: () => responseHeaders,
+      text: () => response.text(),
+    };
   }
 
   async refreshAuthFromPage() {
@@ -208,10 +329,20 @@ class VisaApiClient {
   async request(
     method,
     path,
-    { data, operation, readOnly = true, maxAttempts, timeoutMs = 30_000 } = {},
+    {
+      data,
+      operation,
+      readOnly = true,
+      maxAttempts,
+      timeoutMs = 30_000,
+      retryDelaysMs,
+    } = {},
   ) {
     const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
-    const delays = [500, 1500, 3000];
+    const delays =
+      Array.isArray(retryDelaysMs) && retryDelaysMs.length
+        ? retryDelaysMs
+        : [500, 1500, 3000];
     const configuredAttempts = Number(maxAttempts);
     const attempts = Number.isFinite(configuredAttempts)
       ? Math.max(1, Math.trunc(configuredAttempts))
@@ -229,17 +360,17 @@ class VisaApiClient {
       });
 
       try {
-        const response = await this.context.request.fetch(url, {
+        const response = await this._send(url, {
           method,
           headers: this._headers({ json: data !== undefined }),
-          data: data === undefined ? undefined : JSON.stringify(data),
-          timeout: Math.max(250, Number(timeoutMs) || 30_000),
+          body: data === undefined ? undefined : JSON.stringify(data),
+          timeoutMs: Math.max(250, Number(timeoutMs) || 30_000),
         });
 
         await this._updateAuthFromResponse(response);
         const text = await response.text();
         const body = parseJsonMaybe(text);
-        const status = response.status();
+        const { status } = response;
         const retryAfterMs = parseRetryAfter(response.headers()["retry-after"]);
 
         this.logger("debug", {
@@ -247,6 +378,7 @@ class VisaApiClient {
           event: "request_finish",
           status,
           durationMs: Date.now() - startedAt,
+          transport: this.readTransport,
         });
 
         if (status < 200 || status >= 300) {
@@ -315,7 +447,9 @@ class VisaApiClient {
 
         const message = String(error?.message || error);
         const transient =
-          /timeout|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket|network/i.test(message);
+          /timeout|abort|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket|network|fetch failed/i.test(
+            message,
+          );
         if (readOnly && transient && attempt < attempts) {
           const nextDelayMs = jitter(delays[attempt - 1]);
           this.logger("warn", {
@@ -513,7 +647,7 @@ class VisaApiClient {
     return response;
   }
 
-  async getFirstAvailableMonth(context) {
+  async getFirstAvailableMonth(context, options = {}) {
     const body = {
       applicantId: context.applicantId,
       applicationId: context.applicationId,
@@ -525,11 +659,11 @@ class VisaApiClient {
     return this.request(
       "POST",
       "/visaadministrationapi/v1/modifyslot/getFirstAvailableMonth",
-      { data: body, operation: "getFirstAvailableMonth" },
+      { data: body, operation: "getFirstAvailableMonth", ...options },
     );
   }
 
-  async getAvailableDates(context, { fromDate, toDate }) {
+  async getAvailableDates(context, { fromDate, toDate }, options = {}) {
     const body = {
       fromDate,
       toDate,
@@ -543,7 +677,7 @@ class VisaApiClient {
     const response = await this.request(
       "POST",
       "/visaadministrationapi/v1/modifyslot/getSlotDates",
-      { data: body, operation: "getAvailableDates" },
+      { data: body, operation: "getAvailableDates", ...options },
     );
     if (!Array.isArray(response)) {
       throw new VisaApiContractError("getSlotDates did not return an array", {
@@ -554,7 +688,11 @@ class VisaApiClient {
     return response;
   }
 
-  async getAvailableTimeSlots(context, { slotDate, fromDate, toDate }) {
+  async getAvailableTimeSlots(
+    context,
+    { slotDate, fromDate, toDate },
+    options = {},
+  ) {
     const body = {
       fromDate,
       toDate,
@@ -568,7 +706,7 @@ class VisaApiClient {
     const response = await this.request(
       "POST",
       "/visaadministrationapi/v1/modifyslot/getSlotTime",
-      { data: body, operation: "getAvailableTimeSlots" },
+      { data: body, operation: "getAvailableTimeSlots", ...options },
     );
     if (!Array.isArray(response)) {
       throw new VisaApiContractError("getSlotTime did not return an array", {
@@ -620,4 +758,4 @@ class VisaApiClient {
   }
 }
 
-module.exports = { VisaApiClient };
+module.exports = { VisaApiClient, parseSetCookie };

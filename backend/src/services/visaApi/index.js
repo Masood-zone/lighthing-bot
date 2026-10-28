@@ -9,4 +9,5 @@ module.exports = {
   ...require("./applicantResolver"),
   ...require("./contextBootstrap"),
   ...require("./visaApiClient"),
+  ...require("./scanScheduler"),
 };

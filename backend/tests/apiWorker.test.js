@@ -59,7 +59,7 @@ test("month scan plan treats the platform date as a month boundary", () => {
   );
 });
 
-test("API hunt checks months and dates sequentially until a later month succeeds", async () => {
+test("API hunt fetches months in parallel but still selects the earliest acceptable month", async () => {
   const calls = [];
   const client = {
     async getFirstAvailableMonth() {
@@ -96,9 +96,9 @@ test("API hunt checks months and dates sequentially until a later month succeeds
     "first",
     "dates:2026-10-01",
     "dates:2026-11-01",
+    "dates:2026-12-01",
     "slots:2026-11-04:2026-11-01:2026-11-30",
     "slots:2026-11-08:2026-11-01:2026-11-30",
-    "dates:2026-12-01",
     "slots:2026-12-02:2026-12-01:2026-12-31",
   ]);
 });

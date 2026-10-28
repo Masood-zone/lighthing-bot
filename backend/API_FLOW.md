@@ -113,3 +113,28 @@ The final POST/PUT sends one appointment object:
 | GET    | `/api/queue`                 | Read queued and active worker state.                 |
 | GET    | `/api/analytics`             | Read aggregate session state.                        |
 | GET    | `/api/analytics/stream`      | Stream aggregate state over SSE.                     |
+
+## Booking speed settings
+
+The API worker scans on a start-to-start cadence and backs off only when the
+platform pushes back. All values are environment variables with these defaults:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VISA_FIRST_MONTH_POLL_MS` | 750 | Target time between scan starts |
+| `VISA_SCAN_JITTER_MS` | 100 | Random jitter added to each scan |
+| `VISA_SCAN_TIMEOUT_MS` | 4000 | Timeout for scan and lookup reads |
+| `VISA_HEARTBEAT_MS` | 10000 | Interval of the `AVAILABILITY_SCAN_HEARTBEAT` status |
+| `VISA_API_MAX_MONTHS` | 12 | Maximum months checked per scan |
+| `VISA_DATE_LOOKUP_CONCURRENCY` | 3 | Months fetched with `getSlotDates` in parallel |
+| `VISA_SLOT_LOOKUP_CONCURRENCY` | 2 | Dates fetched with `getSlotTime` in parallel |
+| `VISA_CONFLICT_FALLBACK_LIMIT` | 2 | Different slots tried immediately after a 409 |
+| `VISA_READ_TRANSPORT` | `auto` | `fetch`, `playwright`, or `auto` (fetch unless a proxy is set) |
+| `VISA_TOKEN_REFRESH_LEAD_MS` | 120000 | Start background token refresh this long before expiry |
+| `VISA_SLOW_CONNECTION_MS` | 1200 | Heartbeat flags a slow connection above this average latency |
+
+Backoff: network errors and 5xx wait 1, 2, 4, 8, then 15 s. A 429 honors
+`Retry-After`, otherwise 5, 10, 20, 40, then 60 s. Any 2xx clears both.
+The final booking request is still sent once per slot and never replayed.
+Set `VISA_PERF_TRACE=1` to log per-step timings, including
+`availability_seen_to_booking_sent`.
