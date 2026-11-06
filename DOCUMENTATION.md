@@ -210,6 +210,35 @@ The selected Accra post id defaults to `483` and can be overridden with `VISA_SE
 
 Final submission requests are not automatically retried after an ambiguous timeout or disconnect. The worker requires the final response to match the selected booking before reporting completion.
 
+### One-hour API hunting windows
+
+API-mode workers always open visible Chrome windows, overriding the profile's headless setting. Initial login and valid saved-session reuse keep their existing behavior. DOM-mode workers are unchanged.
+
+Each authenticated hunting window lasts a fixed 60 minutes, including retries, backoff, and early reauthentication. Token refreshes and early sign-ins never extend it. Expiry interrupts scan/backoff waits and prevents new availability or booking submissions. An already-submitted booking finishes verification first; confirmed completion and ambiguous-booking manual verification never trigger an hourly restart.
+
+At expiry the worker releases its hunting slot, drains pending authentication work, removes the saved portal session, clears cookies and portal storage, and reopens the login page with email and password prefilled. Hourly renewal disables automatic Sign In and saved-session restoration. A real press of **Sign In** followed by verified authentication is required; a dashboard redirect alone is insufficient. CAPTCHA or login failures keep waiting, without the ordinary 15-minute sign-in timeout.
+
+After verified manual sign-in, the same worker joins the end of the FIFO queue without scanning. At admission, expired/rejected authentication returns it to manual login without hunting. The next hour starts only when admitted and ready to hunt. Waiting browsers retain their account lock and proxy assignment and still consume memory, but do not count toward `MAX_CONCURRENT`. Queue and analytics `active`/`activeCount` report occupied execution slots rather than all live browsers.
+
+No public status enum, endpoint, or credential payload was added. The backend reports hourly sign-in waiting as `RUNNING` with the message “Hunting paused after one hour. Complete CAPTCHA and press Sign In to continue”; admission waiting is `QUEUED`. Stop, browser closure, worker exit, and shutdown clean up waiting/queued workers. API workers receive a cooperative Stop message to close Chrome before a bounded forced-termination fallback on Windows.
+
+This change is backend-only: web and desktop frontend files are untouched. Status messages remain available through the existing session/user APIs. Run backend verification with `pnpm test` and `pnpm run build`. The controlled browser tests require installed Google Chrome and intercept portal requests with synthetic fixtures; they do not sign in or book on the live visa service.
+
+### Session visibility and API initialization diagnostics
+
+The backend prints one `SESSION_SUMMARY` line per live or queued session every 10 seconds, including its existing name/id prefix, execution mode, PID, stored status, current internal phase/state, phase age, last-message age, and occupied slots. Quiet API initialization remains visible alongside noisy DOM scanning. These summaries only write to the terminal; they do not append repeated entries to the JSON store. Summary tracking stops when the final session exits/is stopped or the backend shuts down.
+
+Example:
+
+```text
+[worker:IB id:<session-id>] SESSION_SUMMARY mode=api pid=123 status=RUNNING phase=initializing state=CONTEXT_BOOTSTRAP phaseAge=20s lastActivity=20s slots=2/5
+[worker:Oko Felix id:<session-id>] SESSION_SUMMARY mode=dom pid=456 status=RUNNING phase=scanning state=DATE phaseAge=40s lastActivity=1s slots=2/5
+```
+
+Forked API/DOM workers send status events through IPC once, rather than printing and forwarding the same status twice. Standalone workers still print their own statuses. Raw diagnostic output and warnings/errors remain available, with stdout/stderr framed into individual lines.
+
+API context bootstrap checks whether the pending-appointment control was actually clicked, shares one timeout budget across browser actions and response parsing, and consumes the parsed appointment response directly. It emits distinct `CONTEXT_BOOTSTRAP_*` outcomes for missing controls, navigation failure, timeout, HTTP failure, invalid JSON/response shape, incomplete context, and ready context. HTTP 500 responses retain platform-failure backoff. Context must come from authenticated portal data; missing identifiers are not fabricated and incomplete initialization is not reported as hunting. Both session execution modes and the existing public API/status categories are retained. No frontend files are changed.
+
 ### Account-Level Locking
 
 Only one queued or running worker may exist for a specific visa booking account at a time. The lock key is based on the visa login host and the booking email. Starting a second session for the same account returns `409 account_session_locked` with the existing session id. Locks are released when the session is stopped, fails to start, completes, errors, or the worker exits.

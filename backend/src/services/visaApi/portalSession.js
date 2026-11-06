@@ -90,7 +90,7 @@ async function loadPortalSession({ profileDir, minRemainingMs = 120_000, now = D
 
 async function clearPortalSession(profileDir) {
   if (!profileDir) return;
-  await fs.rm(sessionFilePath(profileDir), { force: true }).catch(() => {});
+  await fs.rm(sessionFilePath(profileDir), { force: true });
 }
 
 // Seeds sessionStorage once per tab before the portal's scripts run. The

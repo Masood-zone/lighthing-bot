@@ -1,5 +1,10 @@
 const { chromium } = require("playwright");
 const { isCertificateError, certificateFailure } = require("../src/queue/proxyHealth");
+const {
+  createHuntWindow,
+  HuntWindowExpiredError,
+  createResumeGate,
+} = require("../src/services/visaApi/huntWindow");
 
 function isPerfTraceEnabled(value) {
   return value === "1";
@@ -62,8 +67,6 @@ const CONFIG = {
   USER_EMAIL: process.env.VISA_USER_EMAIL || "",
   USER_PASSWORD: process.env.VISA_USER_PASSWORD || "",
   USER_DISPLAY_NAME: process.env.VISA_USER_DISPLAY_NAME || "",
-  HEADLESS:
-    process.env.VISA_HEADLESS === "1" || process.env.VISA_HEADLESS === "true",
   RESCHEDULE:
     process.env.VISA_RESCHEDULE === "1" ||
     process.env.VISA_RESCHEDULE === "true",
@@ -194,7 +197,9 @@ function sendWorkerMessage(message) {
 
 function status(state, message) {
   // eslint-disable-next-line no-console
-  console.log(`[${state}] ${message}`);
+  if (typeof process.send !== "function" || process.connected === false) {
+    console.log(`[${state}] ${message}`);
+  }
   sendWorkerMessage({
     type: "status",
     sessionId: CONFIG.SESSION_ID,
@@ -261,11 +266,11 @@ function getAppBaseUrl() {
 async function launchBrowser() {
   status(
     "LOGIN_BROWSER_STARTING",
-    `${CONFIG.HEADLESS ? "Headless" : "Headed"} Chrome for API session bridge`,
+    "Visible Chrome for API session bridge",
   );
 
   const launchOptions = {
-    headless: CONFIG.HEADLESS,
+    headless: false,
     channel: "chrome",
     args: [
       "--no-sandbox",
@@ -345,22 +350,59 @@ async function waitForLoginSurface(page, timeoutMs = CONFIG.LOGIN_WAIT_TIMEOUT_M
     usernameWait,
     passwordWait,
     dashboardWait,
-    displayNameWait,
+    ...(CONFIG.USER_DISPLAY_NAME ? [displayNameWait] : []),
   ]);
 }
 
-async function waitForLoginOrDashboard(page, timeoutMs = CONFIG.LOGIN_WAIT_TIMEOUT_MS) {
+const manualSignIns = new WeakMap();
+
+async function trackManualSignIn(page) {
+  if (manualSignIns.has(page)) return manualSignIns.get(page);
+  const intent = { submitted: false };
+  await page.exposeBinding("__lightingBotHourlySignIn", ({ frame }) => {
+    if (frame === page.mainFrame()) intent.submitted = true;
+  });
+  const install = () => {
+    if (window.__lightingBotHourlyListener) return;
+    window.__lightingBotHourlyListener = true;
+    document.addEventListener("click", (event) => {
+      const button = event.target instanceof Element
+        ? event.target.closest('button, input[type="submit"]')
+        : null;
+      if (
+        event.isTrusted && button &&
+        /^sign\s*in$/i.test((button.textContent || button.value || "").trim())
+      ) {
+        window.__lightingBotHourlySignIn();
+      }
+    }, true);
+  };
+  await page.addInitScript(install);
+  await page.evaluate(install);
+  manualSignIns.set(page, intent);
+  return intent;
+}
+
+async function waitForLoginOrDashboard(
+  page,
+  timeoutMs = CONFIG.LOGIN_WAIT_TIMEOUT_MS,
+  { manual = false, huntWindow = null, intent = null } = {},
+) {
   const deadline = Date.now() + timeoutMs;
-  const autoSubmit = CONFIG.AUTO_SUBMIT_LOGIN ? createLoginAutoSubmitter(page) : null;
+  const autoSubmit = !manual && CONFIG.AUTO_SUBMIT_LOGIN
+    ? createLoginAutoSubmitter(page)
+    : null;
   while (Date.now() < deadline) {
-    if (/dashboard/i.test(page.url())) return;
+    if (page.isClosed()) throw new Error("Login browser was closed");
+    huntWindow?.assertOpen();
+    if ((!manual || intent?.submitted) && /dashboard/i.test(page.url())) return;
 
     // eslint-disable-next-line no-await-in-loop
     if (autoSubmit && (await autoSubmit())) {
       status("LOGIN_SUBMITTED", "Sign In clicked automatically");
     }
 
-    if (CONFIG.USER_DISPLAY_NAME) {
+    if ((!manual || intent?.submitted) && CONFIG.USER_DISPLAY_NAME) {
       // eslint-disable-next-line no-await-in-loop
       const visible = await page
         .getByText(CONFIG.USER_DISPLAY_NAME, { exact: false })
@@ -377,13 +419,18 @@ async function waitForLoginOrDashboard(page, timeoutMs = CONFIG.LOGIN_WAIT_TIMEO
   throw new Error("Login wait timed out.");
 }
 
-async function login(page) {
+async function login(page, { manual = false, huntWindow = null } = {}) {
+  huntWindow?.assertOpen();
+  const intent = manual ? await trackManualSignIn(page) : null;
+  const timeout = (limit) => huntWindow
+    ? Math.max(1, Math.min(limit, huntWindow.remaining()))
+    : limit;
   status("WAITING_FOR_LOGIN", "Opening visa login page");
 
   try {
     await page.goto(CONFIG.PLATFORM_URL, {
       waitUntil: "commit",
-      timeout: CONFIG.LOGIN_NAV_TIMEOUT_MS,
+      timeout: timeout(CONFIG.LOGIN_NAV_TIMEOUT_MS),
     });
   } catch (error) {
     if (isCertificateError(error)) throw certificateFailure();
@@ -395,35 +442,43 @@ async function login(page) {
     );
   }
 
-  const surface = await waitForLoginSurface(page);
-  if (surface === "dashboard") {
+  huntWindow?.assertOpen();
+  const surface = await waitForLoginSurface(page, timeout(CONFIG.LOGIN_WAIT_TIMEOUT_MS));
+  huntWindow?.assertOpen();
+  if (surface === "dashboard" && !manual) {
     status("SESSION_CAPTURED", "Dashboard already authenticated");
     return;
   }
 
-  if (surface !== "login") {
+  if (surface !== "login" && !manual) {
     throw new Error("Login page did not become ready.");
   }
 
-  if (CONFIG.USER_EMAIL) {
+  if (surface === "login" && CONFIG.USER_EMAIL) {
     await page
       .locator('input[formcontrolname="username"]')
-      .fill(CONFIG.USER_EMAIL, { timeout: 30000 });
+      .fill(CONFIG.USER_EMAIL, { timeout: timeout(30000) });
   }
 
-  if (CONFIG.USER_PASSWORD) {
+  if (surface === "login" && CONFIG.USER_PASSWORD) {
     await page
       .locator('input[formcontrolname="password"]')
-      .fill(CONFIG.USER_PASSWORD, { timeout: 30000 });
+      .fill(CONFIG.USER_PASSWORD, { timeout: timeout(30000) });
   }
 
   status(
     "WAITING_FOR_CAPTCHA",
-    CONFIG.AUTO_SUBMIT_LOGIN
-      ? "Credentials filled; signing in automatically"
-      : "Credentials filled; complete CAPTCHA and sign in",
+    manual
+      ? "Hunting paused after one hour. Complete CAPTCHA and press Sign In to continue"
+      : CONFIG.AUTO_SUBMIT_LOGIN
+        ? "Credentials filled; signing in automatically"
+        : "Credentials filled; complete CAPTCHA and sign in",
   );
-  await waitForLoginOrDashboard(page);
+  await waitForLoginOrDashboard(
+    page,
+    manual ? Infinity : CONFIG.LOGIN_WAIT_TIMEOUT_MS,
+    { manual, huntWindow, intent },
+  );
   status("SESSION_CAPTURED", "Dashboard authenticated");
 }
 
@@ -501,14 +556,20 @@ async function tryRestoreSavedSession({ page, context, networkState }) {
   return auth;
 }
 
+let pendingSessionSave = Promise.resolve();
 function persistPortalSession(page, auth) {
   if (!CONFIG.RESTORE_SESSION || !CONFIG.PROFILE_DIR) return;
-  savePortalSession({ profileDir: CONFIG.PROFILE_DIR, page, auth }).catch((error) => {
-    log("warn", `Could not save portal session: ${error.message}`);
-  });
+  pendingSessionSave = pendingSessionSave
+    .then(() => savePortalSession({ profileDir: CONFIG.PROFILE_DIR, page, auth }))
+    .catch((error) => {
+      log("warn", `Could not save portal session: ${error.message}`);
+    });
 }
 
-async function establishApiSession({ page, context, networkState, allowRestore = false }) {
+async function establishApiSession({
+  page, context, networkState,
+  allowRestore = false, manual = false, huntWindow = null,
+}) {
   if (allowRestore) {
     const restored = await tryRestoreSavedSession({ page, context, networkState }).catch(
       (error) => {
@@ -523,7 +584,8 @@ async function establishApiSession({ page, context, networkState, allowRestore =
   while (true) {
     attempt += 1;
     try {
-      await login(page);
+      huntWindow?.assertOpen();
+      await login(page, { manual, huntWindow });
       await openDashboard(page);
 
       const auth = await captureVisaSession({
@@ -537,17 +599,33 @@ async function establishApiSession({ page, context, networkState, allowRestore =
           "Platform auth token was not captured from sessionStorage or headers",
         );
       }
+      if (manual) {
+        // A dashboard URL/token alone is insufficient to join the queue.
+        const probe = new VisaApiClient({ context, page, auth, baseUrl: getBaseUrl() });
+        await probe.getAuthenticatedUser({ maxAttempts: 1, timeoutMs: 5000 });
+      }
       log("info", `Authenticated page: ${String(auth.storageUrl || "").split("?")[0]}`);
       return auth;
     } catch (error) {
-      if (page.isClosed() || error?.code === "VISA_TLS_CERTIFICATE_ERROR") throw error;
+      if (page.isClosed() || error instanceof HuntWindowExpiredError || error?.code === "VISA_TLS_CERTIFICATE_ERROR") throw error;
+      if (manual && error instanceof VisaApiUnauthorizedError) {
+        // A rejected token must not leave renewal stuck on a dashboard whose
+        // browser state would immediately bypass the prefilled login form.
+        await page.evaluate(() => {
+          window.sessionStorage.clear();
+          window.localStorage.clear();
+        });
+        await context.clearCookies();
+        Object.assign(networkState, createNetworkCapture().state);
+        manualSignIns.get(page).submitted = false;
+      }
       status(
         "SESSION_BRIDGE_RETRY",
         `Authenticated API handoff attempt ${attempt} was not ready; retaining Chrome and retrying`,
       );
       log("warn", formatApiError(error));
       // eslint-disable-next-line no-await-in-loop
-      await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
+      await (huntWindow ? huntWindow.wait(CONFIG.ATTEMPT_INTERVAL_MS) : sleep(CONFIG.ATTEMPT_INTERVAL_MS));
     }
   }
 }
@@ -582,6 +660,7 @@ async function resolveContext({ client, networkState, page, bootstrapCache }) {
     client,
     mode: CONFIG.RESCHEDULE ? "reschedule" : "pending",
     networkState,
+    appointmentRecords: bootstrapCache.appointments || [],
   };
 
   let resolved;
@@ -635,7 +714,13 @@ async function resolveContext({ client, networkState, page, bootstrapCache }) {
           userDisplayName: CONFIG.USER_DISPLAY_NAME,
           userEmail: CONFIG.USER_EMAIL,
           status,
+        }).catch((error) => {
+          error.contextDiagnostics = contextDiagnostics({ ...resolverInput, bootstrapData: bootstrapPieces });
+          throw error;
         });
+        bootstrapCache.appointments = browserBootstrap.body;
+        resolverInput.appointmentRecords = browserBootstrap.body;
+        bootstrapPieces.push(browserBootstrap.body);
         log(
           "info",
           `Context browser bootstrap captured=${browserBootstrap.captured} status=${browserBootstrap.status ?? "none"}`,
@@ -888,6 +973,7 @@ async function findDateAndSlot({
 }
 
 async function submitAndVerify({ client, context, selectedDate, selectedSlot }) {
+  client.huntWindow?.assertOpen();
   const submissionMode = CONFIG.RESCHEDULE ? "reschedule" : "pending";
   const payload = buildAppointmentPayload({
     appointment: context.appointment,
@@ -911,7 +997,7 @@ async function submitAndVerify({ client, context, selectedDate, selectedSlot }) 
       ? await client.submitRescheduleAppointment(payload)
       : await client.submitPendingAppointment(payload);
   } catch (error) {
-    if (error instanceof VisaSlotConflictError) {
+    if (error instanceof VisaSlotConflictError || error instanceof HuntWindowExpiredError) {
       throw error;
     }
     finalError = error;
@@ -1037,7 +1123,7 @@ function emitScanHeartbeat(scanStats, scheduler) {
 function createBackgroundTokenRefresher(client) {
   let inFlight = null;
   let lastAttemptAt = 0;
-  return () => {
+  const refresh = () => {
     if (inFlight) return;
     if (!tokenExpiresSoon(client.auth, CONFIG.TOKEN_REFRESH_LEAD_MS)) return;
     if (Date.now() - lastAttemptAt < 15_000) return;
@@ -1058,6 +1144,8 @@ function createBackgroundTokenRefresher(client) {
         inFlight = null;
       });
   };
+  refresh.drain = () => inFlight || Promise.resolve();
+  return refresh;
 }
 
 function resolveReadTransport() {
@@ -1075,11 +1163,63 @@ function isRecoverableContextError(error) {
   );
 }
 
+async function resetPortalAuthentication({ page, context, profileDir }) {
+  await clearPortalSession(profileDir);
+  const origin = new URL(CONFIG.PLATFORM_URL).origin;
+  // Clear sessionStorage while still on the portal origin, then leave it so
+  // its background scripts cannot repopulate local storage during cleanup.
+  for (const tab of context.pages()) {
+    if (new URL(tab.url()).origin === origin) {
+      await tab.evaluate(() => { window.sessionStorage.clear(); window.localStorage.clear(); });
+    }
+    await tab.goto("about:blank");
+  }
+  await context.clearCookies();
+  const cdp = await context.newCDPSession(page);
+  try {
+    await cdp.send("Storage.clearDataForOrigin", { origin, storageTypes: "all" });
+  } finally {
+    await cdp.detach();
+  }
+  await context.close();
+}
+
+async function validateQueuedAuthentication(client, isExpired = tokenExpiresSoon) {
+  if (isExpired(client.auth)) return false;
+  try {
+    await client.getAuthenticatedUser({ maxAttempts: 1, timeoutMs: 5000 });
+    return !isExpired(client.auth);
+  } catch (error) {
+    if (error instanceof VisaApiUnauthorizedError) return false;
+    throw error;
+  }
+}
+
 async function main() {
   status("START", "Launching API booking worker");
 
-  const { browser, context, page } = await launchBrowser();
-  const capture = createNetworkCapture();
+  let { browser, context, page } = await launchBrowser();
+  let capture = createNetworkCapture();
+  const huntWindow = createHuntWindow();
+  const resumeGate = createResumeGate();
+  let renewalId = 0;
+  let closing = false;
+  const shutdown = () => {
+    if (closing) return;
+    closing = true;
+    void (async () => {
+      await context.close().catch(() => {});
+      if (browser) await browser.close().catch(() => {});
+      process.exit(0);
+    })();
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
+  process.once("disconnect", shutdown);
+  const onControl = (message) => {
+    if (message?.type === "worker_stop") shutdown();
+  };
+  process.on("message", onControl);
   page.on("request", capture.rememberRequest);
   page.on("response", capture.rememberResponse);
 
@@ -1113,6 +1253,7 @@ async function main() {
       networkState: capture.state,
       bookingUserId: CONFIG.SESSION_ID,
       readTransport: resolveReadTransport(),
+      huntWindow,
       logger: (level, payload) => {
         const event = payload?.event || "";
         if (level === "debug" && event === "request_start") return;
@@ -1126,15 +1267,50 @@ async function main() {
     );
     await client.warmUp();
 
-    const scheduler = createScanScheduler({
+    huntWindow.start();
+    let scheduler = createScanScheduler({
       pollMs: CONFIG.FIRST_MONTH_POLL_MS,
       jitterMs: CONFIG.SCAN_JITTER_MS,
     });
     const scanStats = createScanStats();
-    const refreshTokenInBackground = createBackgroundTokenRefresher(client);
+    let refreshTokenInBackground = createBackgroundTokenRefresher(client);
     let lastScanOutcome = "";
 
     while (!completionReported) {
+      if (page.isClosed()) throw new Error("API browser was closed");
+      if (huntWindow.expired()) {
+        // Drain the old scan/refresh/save before clearing authentication. No
+        // final mutation is ever interrupted by this transition.
+        sendWorkerMessage({ type: "hunt_slot_released", requestId: ++renewalId });
+        status("WAITING_FOR_HOURLY_SIGN_IN", "Hunting paused after one hour. Complete CAPTCHA and press Sign In to continue");
+        await refreshTokenInBackground.drain();
+        await pendingSessionSave;
+        auth = null;
+        client.auth = {};
+        resolvedContext = null;
+        bootstrapCache = { user: null, history: null, historyAttempted: false, browserAttemptedAt: 0 };
+        await resetPortalAuthentication({ page, context, profileDir: CONFIG.PROFILE_DIR });
+        if (browser) await browser.close();
+        ({ browser, context, page } = await launchBrowser());
+        capture = createNetworkCapture();
+        page.on("request", capture.rememberRequest);
+        page.on("response", capture.rememberResponse);
+        client.context = context;
+        client.page = page;
+        client.networkState = capture.state;
+        auth = await establishApiSession({ page, context, networkState: capture.state, manual: true });
+        client.auth = auth;
+        // Authentication alone does not authorize hunting: the parent must
+        // grant FIFO admission to this same worker.
+        await resumeGate.request(page);
+        if (!(await validateQueuedAuthentication(client))) continue;
+        persistPortalSession(page, auth);
+        scheduler = createScanScheduler({ pollMs: CONFIG.FIRST_MONTH_POLL_MS, jitterMs: CONFIG.SCAN_JITTER_MS });
+        refreshTokenInBackground = createBackgroundTokenRefresher(client);
+        lastScanOutcome = "";
+        huntWindow.start();
+        status("SESSION_READY", "Signed in; new one-hour hunting window started");
+      }
       const cycleStartedAt = Date.now();
       try {
         refreshTokenInBackground();
@@ -1150,6 +1326,7 @@ async function main() {
             page,
             bootstrapCache,
           });
+          status("HUNTING", "Appointment context ready; scanning availability");
         }
 
         await runApiHuntCycle({
@@ -1159,6 +1336,7 @@ async function main() {
         });
         completionReported = true;
       } catch (error) {
+        if (error instanceof HuntWindowExpiredError) continue;
         if (
           error instanceof VisaNoDatesAvailableError ||
           error instanceof VisaNoSlotsAvailableError
@@ -1175,7 +1353,7 @@ async function main() {
           }
           scheduler.onSuccess();
           emitScanHeartbeat(scanStats, scheduler);
-          await sleep(scheduler.delayUntilNextScan(cycleStartedAt));
+          await huntWindow.wait(scheduler.delayUntilNextScan(cycleStartedAt));
           continue;
         }
 
@@ -1198,7 +1376,8 @@ async function main() {
             "PAUSED",
             "Session retained for manual appointment verification",
           );
-          await new Promise(() => {});
+          if (!page.isClosed()) await page.waitForEvent("close", { timeout: 0 });
+          throw new Error("Browser closed during manual appointment verification");
         }
 
         if (error instanceof VisaApiRateLimitedError) {
@@ -1209,7 +1388,7 @@ async function main() {
             `${formatApiError(error)}; waiting ${Math.ceil(waitMs / 1000)}s`,
           );
           lastScanOutcome = "";
-          await sleep(waitMs);
+          await huntWindow.wait(waitMs);
           continue;
         }
 
@@ -1221,7 +1400,7 @@ async function main() {
             `${formatApiError(error)}; retrying in ${(waitMs / 1000).toFixed(1)}s`,
           );
           lastScanOutcome = "";
-          await sleep(waitMs);
+          await huntWindow.wait(waitMs);
           continue;
         }
 
@@ -1231,7 +1410,12 @@ async function main() {
             page,
             context,
             networkState: capture.state,
+            huntWindow,
+          }).catch((loginError) => {
+            if (loginError instanceof HuntWindowExpiredError) return null;
+            throw loginError;
           });
+          if (!auth) continue;
           client.auth = auth;
           persistPortalSession(page, auth);
           resolvedContext = null;
@@ -1257,22 +1441,26 @@ async function main() {
             `${formatApiError(error)}; missing=${(diagnostics.missingFields || []).join(",") || "complete appointment record"}; capturedResponses=${diagnostics.capturedResponses || 0}; appointmentRecords=${diagnostics.appointmentSearchResponses || 0}; retrying in ${Math.ceil(CONFIG.CONTEXT_RETRY_MS / 1000)}s`,
           );
           resolvedContext = null;
-          await sleep(CONFIG.CONTEXT_RETRY_MS);
+          await huntWindow.wait(CONFIG.CONTEXT_RETRY_MS);
           continue;
         }
 
         status("ERROR", formatApiError(error));
-        await sleep(CONFIG.ATTEMPT_INTERVAL_MS);
+        await huntWindow.wait(CONFIG.ATTEMPT_INTERVAL_MS);
       }
     }
 
     if (completionReported) {
       await openDashboard(page).catch(() => {});
       status("PAUSED", "API booking session left open for manual verification");
-      await new Promise(() => {});
+      if (!page.isClosed()) await page.waitForEvent("close", { timeout: 0 });
     }
 
   } finally {
+    process.removeListener("SIGTERM", shutdown);
+    process.removeListener("SIGINT", shutdown);
+    process.removeListener("disconnect", shutdown);
+    process.removeListener("message", onControl);
     if (context) await context.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
   }
@@ -1293,7 +1481,13 @@ if (require.main === module) {
 
 module.exports = {
   establishApiSession,
+  resolveContext,
+  launchBrowser,
   findDateAndSlot,
+  login,
+  waitForLoginOrDashboard,
+  resetPortalAuthentication,
+  validateQueuedAuthentication,
   isPerfTraceEnabled,
   runApiHuntCycle,
   start,

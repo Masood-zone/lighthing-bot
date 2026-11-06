@@ -475,7 +475,9 @@ function sendWorkerMessage(message) {
 }
 
 function status(state, message) {
-  console.log(`[${state}] ${message}`);
+  if (typeof process.send !== "function" || process.connected === false) {
+    console.log(`[${state}] ${message}`);
+  }
   sendWorkerMessage({
     type: "status",
     sessionId: CONFIG.SESSION_ID,

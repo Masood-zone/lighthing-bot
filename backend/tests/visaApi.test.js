@@ -530,7 +530,7 @@ test("browser bootstrap opens pending appointment and awaits appointment search"
     async isVisible() {
       return true;
     },
-    async evaluate() {
+    async click() {
       clicked = true;
     },
   };
@@ -538,15 +538,16 @@ test("browser bootstrap opens pending appointment and awaits appointment search"
     url: () => "https://www.usvisaappt.com/visaapplicantui/dashboard",
     getByRole: () => visibleCandidate,
     getByText: () => visibleCandidate,
-    async waitForResponse(predicate) {
+    on(event, handler) {
       const response = {
         url: () =>
           "https://www.usvisaappt.com/visaappointmentapi/appointments/search",
         status: () => 200,
+        text: async () => JSON.stringify([appointmentRecord()]),
       };
-      assert.equal(predicate(response), true);
-      return response;
+      if (event === "response") queueMicrotask(() => handler(response));
     },
+    removeListener() {},
     async waitForTimeout() {},
   };
 
@@ -556,7 +557,9 @@ test("browser bootstrap opens pending appointment and awaits appointment search"
     mode: "pending",
   });
   assert.equal(clicked, true);
-  assert.deepEqual(result, { captured: true, status: 200 });
+  assert.equal(result.captured, true);
+  assert.equal(result.status, 200);
+  assert.equal(result.outcome, "READY");
 });
 
 test("browser bootstrap opens reschedule surface before awaiting appointment search", async () => {
@@ -594,15 +597,16 @@ test("browser bootstrap opens reschedule surface before awaiting appointment sea
   dialog.locator = () => confirmButton;
 
   const page = {
-    async waitForResponse(predicate) {
+    on(event, handler) {
       const response = {
         url: () =>
           "https://www.usvisaappt.com/visaappointmentapi/appointments/search",
         status: () => 200,
+        text: async () => JSON.stringify([appointmentRecord({ appointmentStatus: "SCHEDULED" })]),
       };
-      assert.equal(predicate(response), true);
-      return response;
+      if (event === "response") queueMicrotask(() => handler(response));
     },
+    removeListener() {},
     async goto(url) {
       calls.goto.push(url);
     },
@@ -635,7 +639,9 @@ test("browser bootstrap opens reschedule surface before awaiting appointment sea
     status: (code, message) => events.push({ code, message }),
   });
 
-  assert.deepEqual(result, { captured: true, status: 200 });
+  assert.equal(result.captured, true);
+  assert.equal(result.status, 200);
+  assert.equal(result.outcome, "READY");
   assert.equal(
     calls.goto[0],
     "https://www.usvisaappt.com/visaapplicantui/home/appointment/myappointment",
@@ -644,7 +650,7 @@ test("browser bootstrap opens reschedule surface before awaiting appointment sea
   assert.equal(calls.clickedConfirm, true);
   assert.deepEqual(
     events.map((event) => event.code),
-    ["MY_APPOINTMENTS", "RESCHEDULE_CLICK", "RESCHEDULE_CONFIRM", "BOOKING_WAIT"],
+    ["MY_APPOINTMENTS", "RESCHEDULE_CLICK", "RESCHEDULE_CONFIRM", "BOOKING_WAIT", "CONTEXT_BOOTSTRAP_READY"],
   );
 });
 

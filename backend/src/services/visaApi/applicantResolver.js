@@ -240,6 +240,7 @@ async function resolveApplicantContext({
   networkState,
   bootstrapData,
   allowDirectSearch = false,
+  appointmentRecords = [],
 }) {
   const knownApplicationIds = [
     ...applicationIdsFromNetwork(networkState),
@@ -249,7 +250,7 @@ async function resolveApplicantContext({
     new Set(knownApplicationIds.map(String).filter(Boolean)),
   );
 
-  const capturedAppointments = appointmentResponsesFromNetwork(networkState);
+  const capturedAppointments = [...appointmentRecords, ...appointmentResponsesFromNetwork(networkState)];
   const capturedAppointment = chooseAppointment(capturedAppointments, { mode });
   if (capturedAppointment) {
     return {

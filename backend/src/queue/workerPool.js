@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { fork } = require("node:child_process");
+const { SessionMonitor, createLineReader } = require("./sessionMonitor");
 
 const {
   decryptProxyUrl,
@@ -328,6 +329,8 @@ class WorkerPool {
     desktopNotificationsEnabled,
     proxyMode = process.env.VISA_PROXY_MODE || "auto",
     proxyHealthCheck = checkProxyHealth,
+    forkWorker = fork,
+    monitorOptions = {},
   }) {
     this.store = store;
     this.proxyMode = String(proxyMode).trim().toLowerCase();
@@ -335,6 +338,7 @@ class WorkerPool {
       throw new Error("VISA_PROXY_MODE must be auto or direct");
     }
     this.proxyHealthCheck = proxyHealthCheck;
+    this.forkWorker = forkWorker;
     // Allow disabling worker execution entirely by setting MAX_CONCURRENT=0.
     this.maxConcurrent = Math.max(0, Number(maxConcurrent ?? 1));
     this.workerEntry = workerEntry;
@@ -398,10 +402,26 @@ class WorkerPool {
     this.queue = [];
     /** @type {Map<string, import('node:child_process').ChildProcess>} */
     this.active = new Map();
+    // Live browsers may wait for sign-in without occupying hunting capacity.
+    this.hunting = new Set();
+    this.renewals = new Map();
+    this.stopping = new Set();
+    this.shuttingDown = false;
+    this.monitor = new SessionMonitor({
+      ...monitorOptions,
+      emit: (id, record) => {
+        const session = this.store.getSession(id);
+        if (!session) return;
+        const pid = this.active.get(id)?.pid || "none";
+        logWorkerToBackendConsole(id, session, "info",
+          `SESSION_SUMMARY mode=${resolveSessionExecutionMode(session)} pid=${pid} status=${session.status} phase=${record.phase} state=${record.state} phaseAge=${record.phaseSeconds}s lastActivity=${record.activitySeconds}s slots=${this.hunting.size}/${this.maxConcurrent}`);
+      },
+    });
 
     // best-effort cleanup
-    process.on("SIGINT", () => this.shutdown());
-    process.on("SIGTERM", () => this.shutdown());
+    this.handleShutdown = () => this.shutdown();
+    process.on("SIGINT", this.handleShutdown);
+    process.on("SIGTERM", this.handleShutdown);
   }
 
   getSnapshot() {
@@ -409,8 +429,8 @@ class WorkerPool {
       workersEnabled: this.maxConcurrent > 0,
       maxConcurrent: this.maxConcurrent,
       queued: this.queue.slice(),
-      active: Array.from(this.active.keys()),
-      activeCount: this.active.size,
+      active: Array.from(this.hunting),
+      activeCount: this.hunting.size,
       queuedCount: this.queue.length,
       ts: nowIso(),
     };
@@ -425,6 +445,7 @@ class WorkerPool {
   }
 
   enqueue(sessionId) {
+    if (this.shuttingDown) return { queued: false, reason: "shutting_down" };
     const session = this.store.getSession(sessionId);
     if (!session) return { queued: false, reason: "not_found" };
 
@@ -476,6 +497,7 @@ class WorkerPool {
 
     this.accountLocks.set(accountKey, sessionId);
     this.queue.push(sessionId);
+    this.monitor.update(sessionId, "QUEUED");
     this.store.setStatus(sessionId, "QUEUED", "Queued for execution");
     this.store.setQueueTimes(sessionId, { enqueuedAt: nowIso() });
     logSessionLifecycle(sessionId, session, "Queued session start");
@@ -510,17 +532,16 @@ class WorkerPool {
 
     const child = this.active.get(sessionId);
     if (child) {
+      this.stopping.add(sessionId);
+      this.monitor.update(sessionId, "STOPPING");
       this.store.appendLog(sessionId, "warn", "Stopping worker (SIGTERM)");
       logSessionLifecycle(sessionId, session, "Stopping session");
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
+      this._terminateWorker(sessionId, child);
       return true;
     }
 
     this._releaseAccountLock(sessionId);
+    this.monitor.remove(sessionId);
     this.store.setStatus(sessionId, "STOPPED", "Stopped");
     this.store.setQueueTimes(sessionId, { finishedAt: nowIso() });
     logSessionLifecycle(sessionId, session, "Stopped session");
@@ -528,17 +549,49 @@ class WorkerPool {
   }
 
   shutdown() {
+    this.monitor.close();
+    process.removeListener("SIGINT", this.handleShutdown);
+    process.removeListener("SIGTERM", this.handleShutdown);
+    this.shuttingDown = true;
+    for (const id of this.queue) {
+      if (this.active.has(id)) continue;
+      this._releaseAccountLock(id);
+      this.store.setStatus(id, "STOPPED", "Server shutting down");
+      this.store.setQueueTimes(id, { finishedAt: nowIso() });
+    }
+    this.queue = [];
     for (const [id, child] of this.active.entries()) {
+      this.stopping.add(id);
       try {
         this.store.appendLog(
           id,
           "warn",
           "Server shutting down; terminating worker",
         );
-        child.kill("SIGTERM");
+        this._terminateWorker(id, child);
       } catch {
         // ignore
       }
+    }
+  }
+
+  _terminateWorker(sessionId, child) {
+    const kill = () => {
+      try { child.kill("SIGTERM"); } catch { /* Already exited. */ }
+    };
+    if (resolveSessionExecutionMode(this.store.getSession(sessionId)) !== "api" || !child.connected) {
+      kill();
+      return;
+    }
+    // Windows SIGTERM terminates Node immediately. Give API workers a chance
+    // to close Chrome first, retaining a bounded fallback for an unresponsive worker.
+    const fallback = setTimeout(kill, 5000);
+    fallback.unref();
+    child.once("exit", () => clearTimeout(fallback));
+    try {
+      child.send({ type: "worker_stop" }, (error) => { if (error) kill(); });
+    } catch {
+      kill();
     }
   }
 
@@ -547,7 +600,8 @@ class WorkerPool {
   }
 
   _tick() {
-    if (this.active.size + this.starting.size >= this.maxConcurrent) {
+    if (this.shuttingDown) return;
+    if (this.hunting.size + this.starting.size >= this.maxConcurrent) {
       return;
     }
 
@@ -558,6 +612,29 @@ class WorkerPool {
     const nextId = this.queue.shift();
     if (!nextId) return;
 
+    const child = this.active.get(nextId);
+    if (child) {
+      const renewal = this.renewals.get(nextId);
+      if (renewal?.phase !== "queued" || this.stopping.has(nextId)) {
+        this._tick();
+        return;
+      }
+      renewal.phase = "hunting";
+      this.monitor.update(nextId, "SESSION_READY");
+      this.hunting.add(nextId);
+      this.store.setStatus(nextId, "RUNNING", "Hunting slot granted after sign-in");
+      this.store.setQueueTimes(nextId, { startedAt: nowIso() });
+      try {
+        child.send({ type: "hunt_resume_granted", requestId: renewal.requestId }, (error) => {
+          if (error) this.stop(nextId);
+        });
+      } catch {
+        this.stop(nextId);
+      }
+      this._tick();
+      return;
+    }
+
     this.starting.add(nextId);
     void this._startSession(nextId)
       .catch((err) => {
@@ -567,6 +644,8 @@ class WorkerPool {
           `Worker start failed: ${String(err?.message || err)}`,
         );
         this._releaseAccountLock(nextId);
+        this.store.setStatus(nextId, "ERROR", "Worker failed to start");
+        this.monitor.remove(nextId);
       })
       .finally(() => {
         this.starting.delete(nextId);
@@ -574,14 +653,40 @@ class WorkerPool {
       });
   }
 
+  _handleHuntControl(sessionId, child, msg) {
+    if (this.active.get(sessionId) !== child || this.stopping.has(sessionId)) return;
+    if (resolveSessionExecutionMode(this.store.getSession(sessionId)) !== "api") return;
+    if (!Number.isSafeInteger(msg.requestId) || msg.requestId < 1) return;
+    const renewal = this.renewals.get(sessionId);
+    if (msg.type === "hunt_slot_released") {
+      if (!this.hunting.has(sessionId) || msg.requestId !== (renewal?.requestId || 0) + 1) return;
+      this.hunting.delete(sessionId);
+      this.monitor.update(sessionId, "WAITING_FOR_HOURLY_SIGN_IN");
+      this.renewals.set(sessionId, { requestId: msg.requestId, phase: "login" });
+      this.store.setStatus(sessionId, "RUNNING", "Hunting paused after one hour. Complete CAPTCHA and press Sign In to continue");
+      this._tick();
+    } else if (msg.type === "hunt_resume_requested") {
+      if (renewal?.phase !== "login" || renewal.requestId !== msg.requestId) return;
+      renewal.phase = "queued";
+      this.monitor.update(sessionId, "QUEUED");
+      this.queue.push(sessionId);
+      this.store.setStatus(sessionId, "QUEUED", "Signed in; queued for a hunting slot");
+      this.store.setQueueTimes(sessionId, { enqueuedAt: nowIso() });
+      this._tick();
+    }
+  }
+
   async _startSession(sessionId) {
+    this.monitor.update(sessionId, "STARTING");
     const session = this.store.getSession(sessionId);
     if (!session) {
       this._releaseAccountLock(sessionId);
+      this.monitor.remove(sessionId);
       return;
     }
     if (session.status === "STOPPED" || session.status === "BLOCKED") {
       this._releaseAccountLock(sessionId);
+      this.monitor.remove(sessionId);
       return;
     }
 
@@ -628,6 +733,7 @@ class WorkerPool {
       this.store.setStatus(sessionId, "ERROR", "Credential preparation failed");
       this.store.setQueueTimes(sessionId, { finishedAt: nowIso() });
       this._releaseAccountLock(sessionId);
+      this.monitor.remove(sessionId);
       return;
     }
 
@@ -686,6 +792,7 @@ class WorkerPool {
     const currentSession = this.store.getSession(sessionId);
     if (!currentSession || currentSession.status === "STOPPED") {
       this._releaseAccountLock(sessionId);
+      this.monitor.remove(sessionId);
       return;
     }
 
@@ -869,15 +976,23 @@ class WorkerPool {
     const launchSession = this.store.getSession(sessionId);
     if (!launchSession || launchSession.status === "STOPPED") {
       this._releaseAccountLock(sessionId);
+      this.monitor.remove(sessionId);
       return;
     }
 
-    const child = fork(this.workerEntry, [], {
+    if (this.shuttingDown || this.store.getSession(sessionId)?.status === "STOPPED") {
+      this._releaseAccountLock(sessionId);
+      this._releaseProxyAssignment(sessionId);
+      this.monitor.remove(sessionId);
+      return;
+    }
+    const child = this.forkWorker(this.workerEntry, [], {
       env,
       stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
 
     this.active.set(sessionId, child);
+    this.hunting.add(sessionId);
     this.store.setRuntime(sessionId, {
       pid: child.pid,
       exitCode: null,
@@ -892,26 +1007,30 @@ class WorkerPool {
         : describeProxySelection(proxySelection),
     );
 
-    child.stdout?.on("data", (buf) => {
-      const line = buf.toString("utf8").trim();
-      if (line) {
-        this.store.appendLog(sessionId, "info", line);
-        logWorkerToBackendConsole(sessionId, session, "info", line);
-      }
+    const reader = (level) => createLineReader((line) => {
+      if (!this.shuttingDown && this.active.get(sessionId) === child) this.monitor.update(sessionId);
+      this.store.appendLog(sessionId, level, line);
+      logWorkerToBackendConsole(sessionId, session, level, line);
     });
-
-    child.stderr?.on("data", (buf) => {
-      const line = buf.toString("utf8").trim();
-      if (line) {
-        this.store.appendLog(sessionId, "error", line);
-        logWorkerToBackendConsole(sessionId, session, "error", line);
-      }
-    });
+    const stdout = reader("info");
+    const stderr = reader("error");
+    child.stdout?.on("data", (buf) => stdout.write(buf));
+    child.stderr?.on("data", (buf) => stderr.write(buf));
+    child.stdout?.once("end", () => stdout.end());
+    child.stderr?.once("end", () => stderr.end());
+    child.once("close", () => { stdout.end(); stderr.end(); });
 
     child.on("message", (msg) => {
       if (!msg || typeof msg !== "object") return;
+      if (msg.type === "hunt_slot_released" || msg.type === "hunt_resume_requested") {
+        this._handleHuntControl(sessionId, child, msg);
+        return;
+      }
+      if (this.stopping.has(sessionId)) return;
+      if (msg.type === "status" && msg.state === "PAUSED" && this.store.getSession(sessionId)?.status === "COMPLETED") return;
       if (msg.type === "status") {
         const { state, message } = msg;
+        this.monitor.update(sessionId, state);
 
         // Capture booking context from worker messages (best-effort).
         if (typeof state === "string") {
@@ -1061,6 +1180,7 @@ class WorkerPool {
         }
       }
       if (msg.type === "log") {
+        this.monitor.update(sessionId);
         this.store.appendLog(sessionId, msg.level || "info", msg.message || "");
 
         logWorkerToBackendConsole(
@@ -1073,7 +1193,13 @@ class WorkerPool {
     });
 
     child.on("exit", (code, signal) => {
+      const wasStopped = this.stopping.has(sessionId);
+      this.monitor.remove(sessionId);
       this.active.delete(sessionId);
+      this.hunting.delete(sessionId);
+      this.renewals.delete(sessionId);
+      this.stopping.delete(sessionId);
+      this.dequeue(sessionId);
       this._releaseProxyAssignment(sessionId);
       this._releaseAccountLock(sessionId);
       this.bookingContext.delete(sessionId);
@@ -1083,7 +1209,9 @@ class WorkerPool {
       this.store.setQueueTimes(sessionId, { finishedAt: nowIso() });
 
       const current = this.store.getSession(sessionId);
-      if (current?.status === "BLOCKED") {
+      if (wasStopped) {
+        this.store.setStatus(sessionId, "STOPPED", "Stopped");
+      } else if (current?.status === "BLOCKED") {
         this.store.appendLog(
           sessionId,
           "warn",

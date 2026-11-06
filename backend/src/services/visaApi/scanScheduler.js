@@ -78,7 +78,12 @@ async function mapInBatches(items, limit, fn, { stopWhen } = {}) {
   for (let index = 0; index < items.length; index += size) {
     const batch = items.slice(index, index + size);
     // eslint-disable-next-line no-await-in-loop
-    const settled = await Promise.all(batch.map((item) => fn(item)));
+    // Drain every in-flight lookup before propagating an error. In particular,
+    // hourly expiry must not reset browser authentication under a sibling read.
+    const outcomes = await Promise.allSettled(batch.map((item) => fn(item)));
+    const failure = outcomes.find((outcome) => outcome.status === "rejected");
+    if (failure) throw failure.reason;
+    const settled = outcomes.map((outcome) => outcome.value);
     results.push(...settled);
     if (stopWhen && stopWhen(settled)) break;
   }

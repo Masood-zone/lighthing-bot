@@ -112,8 +112,10 @@ class VisaApiClient {
     bookingUserId,
     readTransport = "playwright",
     fetchImpl = globalThis.fetch,
+    huntWindow = null,
   } = {}) {
     this.context = context;
+    this.huntWindow = huntWindow;
     this.page = page;
     this.auth = auth || {};
     this.baseUrl = String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, "");
@@ -153,8 +155,9 @@ class VisaApiClient {
     }
   }
 
-  async _send(url, { method, headers, body, timeoutMs }) {
+  async _send(url, { method, headers, body, timeoutMs, beforeSend }) {
     if (this.readTransport !== "fetch") {
+      beforeSend?.();
       const response = await this.context.request.fetch(url, {
         method,
         headers,
@@ -177,6 +180,7 @@ class VisaApiClient {
         .map((cookie) => `${cookie.name}=${cookie.value}`)
         .join("; ");
     }
+    beforeSend?.();
     const response = await this.fetchImpl(url, {
       method,
       headers: requestHeaders,
@@ -351,7 +355,19 @@ class VisaApiClient {
         : 1;
     const op = operation || `${method} ${path}`;
 
+    const huntingRequest = [
+      "getFirstAvailableMonth",
+      "getAvailableDates",
+      "getAvailableTimeSlots",
+      "submitPendingAppointment",
+      "submitRescheduleAppointment",
+    ].includes(op);
+    const waitForRetry = (ms) => huntingRequest && this.huntWindow
+      ? this.huntWindow.wait(ms)
+      : sleep(ms);
+
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      if (huntingRequest) this.huntWindow?.assertOpen();
       const startedAt = Date.now();
       this.logger("debug", {
         operation: op,
@@ -365,6 +381,7 @@ class VisaApiClient {
           headers: this._headers({ json: data !== undefined }),
           body: data === undefined ? undefined : JSON.stringify(data),
           timeoutMs: Math.max(250, Number(timeoutMs) || 30_000),
+          beforeSend: huntingRequest ? () => this.huntWindow?.assertOpen() : undefined,
         });
 
         await this._updateAuthFromResponse(response);
@@ -397,7 +414,7 @@ class VisaApiClient {
               attempt,
               nextDelayMs,
             });
-            await sleep(nextDelayMs);
+            await waitForRetry(nextDelayMs);
             continue;
           }
           this.logger("warn", {
@@ -438,7 +455,7 @@ class VisaApiClient {
             attempt,
             nextDelayMs,
           });
-          await sleep(nextDelayMs);
+          await waitForRetry(nextDelayMs);
           continue;
         }
 
@@ -451,7 +468,7 @@ class VisaApiClient {
             attempt,
             nextDelayMs,
           });
-          await sleep(nextDelayMs);
+          await waitForRetry(nextDelayMs);
           continue;
         }
 
@@ -469,7 +486,7 @@ class VisaApiClient {
             error: message,
             nextDelayMs,
           });
-          await sleep(nextDelayMs);
+          await waitForRetry(nextDelayMs);
           continue;
         }
 
@@ -506,6 +523,7 @@ class VisaApiClient {
     // Refresh immediately before the single final mutation. This keeps the
     // worker's explicit API headers aligned with the active browser session.
     await this.refreshAuthFromPage();
+    this.huntWindow?.assertOpen();
 
     const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
     const op = operation || `${method} ${path}`;
