@@ -56,6 +56,7 @@ The backend runs as a single Express server (default port `3001`). It exposes a 
 | `VISA_SECRET_KEY` | Encryption key for stored passwords | — |
 | `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS` | Email notification SMTP config | — |
 | `PROXY_API_KEY` | Proxy11 API key for rotating proxies | — |
+| `VISA_PROXY_MODE` | `auto` uses configured proxies; `direct` bypasses Proxy11, session proxies, pools, and fallback proxies | `auto` |
 
 ### API Endpoints
 
@@ -224,6 +225,12 @@ VISA_EXECUTION_MODE=dom
 to use the original Playwright DOM workflow. API mode is now the normal app path.
 
 ### Proxy System
+
+For a normal connection without application-configured proxies, set `VISA_PROXY_MODE=direct` in `backend/.env`, restart the backend, and restart the affected hunts. Already-running workers retain their original connection. This setting does not remove any proxy credentials or saved profile settings. It bypasses application proxy settings; system-level VPN or network settings still apply.
+
+In `auto` mode, proxy preflight opens an isolated headless Chrome probe and validates HTTPS certificates for the portal host and Google before starting a booking browser. An HTTP CONNECT response alone is insufficient. Failing proxies are skipped for the lifetime of the backend process; after the configured number of attempts, the existing direct fallback still applies. Certificate checks stay enabled. A certificate error that occurs later during API login terminates that worker with an actionable error instead of waiting indefinitely on Chrome's privacy warning.
+
+A direct connection passing TLS validation can still receive HTTP 403 or another access restriction. That is a separate problem; the proxy fix does not promise to remove platform access restrictions.
 
 The system supports multiple proxy configurations:
 

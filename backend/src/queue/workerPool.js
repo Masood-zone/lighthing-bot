@@ -235,118 +235,12 @@ function safeOneLine(value) {
     .trim();
 }
 
-// Preflight proxy health checks
-const net = require("node:net");
-
-const PREFLIGHT_TCP_TIMEOUT_MS = Math.max(
-  1500,
-  Number(process.env.PROXY_PREFLIGHT_TCP_TIMEOUT_MS) || 3000,
-);
-const PREFLIGHT_CONNECT_TIMEOUT_MS = Math.max(
-  2000,
-  Number(process.env.PROXY_PREFLIGHT_CONNECT_TIMEOUT_MS) || 4000,
-);
+// Bound the number of proxies tested before the existing direct fallback.
+const { checkProxyHealth } = require("./proxyHealth");
 const PREFLIGHT_MAX_ATTEMPTS = Math.max(
   1,
   Number(process.env.PROXY_PREFLIGHT_MAX_ATTEMPTS) || 3,
 );
-
-function tcpConnect(host, port, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const sock = net.connect({ host, port }, () => {
-      sock.destroy();
-      resolve(true);
-    });
-    sock.on("error", (err) => {
-      try {
-        sock.destroy();
-      } catch {}
-      reject(err);
-    });
-    sock.setTimeout(timeoutMs, () => {
-      try {
-        sock.destroy();
-      } catch {}
-      reject(new Error("tcp timeout"));
-    });
-  });
-}
-
-function httpConnectThroughProxy(proxyParsed, targetHost, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const proxyHost = proxyParsed.hostname;
-    const proxyPort = Number(
-      proxyParsed.port || (proxyParsed.protocol === "https:" ? 443 : 80),
-    );
-
-    const sock = net.connect({ host: proxyHost, port: proxyPort }, () => {
-      // Send a CONNECT request for TLS tunnel test
-      const connectReq = `CONNECT ${targetHost}:443 HTTP/1.1\r\nHost: ${targetHost}:443\r\nConnection: close\r\n\r\n`;
-      sock.write(connectReq);
-    });
-
-    let acc = "";
-    const onData = (chunk) => {
-      acc += String(chunk || "");
-      // Stop after headers received
-      if (acc.includes("\r\n\r\n")) {
-        const statusLine = acc.split(/\r\n/)[0] || "";
-        const m = statusLine.match(/HTTP\/\d\.\d\s+(\d{3})/);
-        const code = m ? Number(m[1]) : 0;
-        try {
-          sock.destroy();
-        } catch {}
-        if (code >= 200 && code < 300) {
-          resolve(true);
-        } else {
-          reject(new Error(`CONNECT failed ${code || statusLine}`));
-        }
-      }
-    };
-
-    const onError = (err) => {
-      try {
-        sock.destroy();
-      } catch {}
-      reject(err);
-    };
-
-    sock.on("data", onData);
-    sock.on("error", onError);
-    sock.setTimeout(timeoutMs, () => {
-      try {
-        sock.destroy();
-      } catch {}
-      reject(new Error("connect timeout"));
-    });
-  });
-}
-
-async function checkProxyHealth(proxyUrl, platformHost) {
-  if (!proxyUrl) return { ok: false, reason: "no-proxy" };
-  try {
-    const parsed = new URL(proxyUrl);
-    const proxyHost = parsed.hostname;
-    const proxyPort = Number(
-      parsed.port || (parsed.protocol === "https:" ? 443 : 80),
-    );
-
-    // Basic TCP reachability
-    await tcpConnect(proxyHost, proxyPort, PREFLIGHT_TCP_TIMEOUT_MS);
-
-    // Try CONNECT to platform host and to Google (recaptcha) as a probe.
-    const targets = [platformHost || "www.google.com", "www.google.com"];
-    for (const t of targets) {
-      // if CONNECT fails, throw
-      // eslint-disable-next-line no-await-in-loop
-      await httpConnectThroughProxy(parsed, t, PREFLIGHT_CONNECT_TIMEOUT_MS);
-    }
-
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, reason: String(err?.message || err) };
-  }
-}
 
 function extractIsoDateFromText(text) {
   const m = String(text || "").match(/\b\d{4}-\d{2}-\d{2}\b/);
@@ -432,8 +326,15 @@ class WorkerPool {
     notificationService,
     desktopNotificationService,
     desktopNotificationsEnabled,
+    proxyMode = process.env.VISA_PROXY_MODE || "auto",
+    proxyHealthCheck = checkProxyHealth,
   }) {
     this.store = store;
+    this.proxyMode = String(proxyMode).trim().toLowerCase();
+    if (!["auto", "direct"].includes(this.proxyMode)) {
+      throw new Error("VISA_PROXY_MODE must be auto or direct");
+    }
+    this.proxyHealthCheck = proxyHealthCheck;
     // Allow disabling worker execution entirely by setting MAX_CONCURRENT=0.
     this.maxConcurrent = Math.max(0, Number(maxConcurrent ?? 1));
     this.workerEntry = workerEntry;
@@ -778,7 +679,7 @@ class WorkerPool {
       this.active,
       this.proxyAssignments,
     );
-    let proxySelection = await this.proxy11Rotator
+    let proxySelection = this.proxyMode === "direct" ? null : await this.proxy11Rotator
       .acquire({ sessionId, activeProxyUrls: reservedProxyUrls })
       .catch(() => null);
 
@@ -826,7 +727,9 @@ class WorkerPool {
         );
       }
 
-      proxySelection = sessionProxyUrl
+      proxySelection = this.proxyMode === "direct"
+        ? { proxyUrl: "", proxyIndex: null, proxySource: "direct" }
+        : sessionProxyUrl
         ? {
             proxyUrl: sessionProxyUrl,
             proxyIndex: null,
@@ -868,7 +771,7 @@ class WorkerPool {
           // Try to pick another candidate
         } else {
           // eslint-disable-next-line no-await-in-loop
-          const result = await checkProxyHealth(
+          const result = await this.proxyHealthCheck(
             currentSelection.proxyUrl,
             platformHost,
           ).catch((e) => ({ ok: false, reason: String(e?.message || e) }));
@@ -951,7 +854,9 @@ class WorkerPool {
       this.store.appendLog(
         sessionId,
         "warn",
-        "No proxy configured for this session; it will use the local IP",
+        this.proxyMode === "direct"
+        ? "Direct connection requested (VISA_PROXY_MODE=direct); all configured proxies are bypassed"
+        : "No proxy configured for this session; it will use the local IP",
       );
     }
 

@@ -1,4 +1,5 @@
 const { chromium } = require("playwright");
+const { isCertificateError, certificateFailure } = require("../src/queue/proxyHealth");
 
 function isPerfTraceEnabled(value) {
   return value === "1";
@@ -227,6 +228,7 @@ function normalizeProxyUrl(raw) {
 }
 
 function buildProxyConfig() {
+  if (String(process.env.VISA_PROXY_MODE || "").trim().toLowerCase() === "direct") return null;
   const normalized = normalizeProxyUrl(CONFIG.PROXY_URL);
   if (!normalized) return null;
 
@@ -384,6 +386,7 @@ async function login(page) {
       timeout: CONFIG.LOGIN_NAV_TIMEOUT_MS,
     });
   } catch (error) {
+    if (isCertificateError(error)) throw certificateFailure();
     status(
       "WAITING_FOR_LOGIN",
       `Login page is loading slowly; waiting for a usable surface (${String(
@@ -537,7 +540,7 @@ async function establishApiSession({ page, context, networkState, allowRestore =
       log("info", `Authenticated page: ${String(auth.storageUrl || "").split("?")[0]}`);
       return auth;
     } catch (error) {
-      if (page.isClosed()) throw error;
+      if (page.isClosed() || error?.code === "VISA_TLS_CERTIFICATE_ERROR") throw error;
       status(
         "SESSION_BRIDGE_RETRY",
         `Authenticated API handoff attempt ${attempt} was not ready; retaining Chrome and retrying`,
@@ -1289,6 +1292,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  establishApiSession,
   findDateAndSlot,
   isPerfTraceEnabled,
   runApiHuntCycle,
