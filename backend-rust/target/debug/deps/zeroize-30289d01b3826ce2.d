@@ -1,0 +1,10 @@
+F:\lighthing-bot\backend-rust\target\debug\deps\zeroize-30289d01b3826ce2.d: C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\lib.rs C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\x86.rs C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\barrier.rs C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\bulk.rs C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\stack.rs C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\../README.md
+
+F:\lighthing-bot\backend-rust\target\debug\deps\libzeroize-30289d01b3826ce2.rmeta: C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\lib.rs C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\x86.rs C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\barrier.rs C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\bulk.rs C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\stack.rs C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\../README.md
+
+C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\lib.rs:
+C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\x86.rs:
+C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\barrier.rs:
+C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\bulk.rs:
+C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\stack.rs:
+C:\Users\ForitFind\ Org\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zeroize-1.9.2\src\../README.md:
