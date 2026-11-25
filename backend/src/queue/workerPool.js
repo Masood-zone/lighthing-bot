@@ -339,6 +339,8 @@ class WorkerPool {
     }
     this.proxyHealthCheck = proxyHealthCheck;
     this.forkWorker = forkWorker;
+    this.loginRotations = new Map();
+    this.recoveryProxyReservations = new Set();
     // Allow disabling worker execution entirely by setting MAX_CONCURRENT=0.
     this.maxConcurrent = Math.max(0, Number(maxConcurrent ?? 1));
     this.workerEntry = workerEntry;
@@ -651,6 +653,50 @@ class WorkerPool {
         this.starting.delete(nextId);
         this._tick();
       });
+  }
+
+  async _recoverLoginProxy(sessionId, child, requestId) {
+    if (this.active.get(sessionId) !== child || this.stopping.has(sessionId) || this.shuttingDown) return;
+    const previous = this.loginRotations.get(sessionId) || { count: 0, busy: false };
+    if (previous.busy || previous.count >= 3) {
+      if (!previous.busy) {
+        try { child.send({ type: "login_proxy_result", requestId }, () => {}); } catch {}
+      }
+      return;
+    }
+    previous.busy = true;
+    previous.count++;
+    this.loginRotations.set(sessionId, previous);
+    const current = this.proxyAssignments.get(sessionId)?.proxyUrl;
+    if (current) this.failedProxyUrls.add(current);
+    let selected = null;
+    let reservedCandidate = null;
+    try {
+      const session = this.store.getSession(sessionId);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (this.stopping.has(sessionId) || this.shuttingDown) return;
+        const reserved = getActiveProxyUrls(this.active, this.proxyAssignments);
+        for (const failed of this.failedProxyUrls) reserved.add(failed);
+        for (const pending of this.recoveryProxyReservations) reserved.add(pending);
+        const candidate = await this.proxy11Rotator.acquire({ sessionId, activeProxyUrls: reserved });
+        if (!candidate || reserved.has(candidate.proxyUrl) || this.recoveryProxyReservations.has(candidate.proxyUrl) || getActiveProxyUrls(this.active, this.proxyAssignments).has(candidate.proxyUrl)) break;
+        reservedCandidate = candidate.proxyUrl;
+        this.recoveryProxyReservations.add(reservedCandidate);
+        const result = await this.proxyHealthCheck(candidate.proxyUrl, new URL(session.config.loginUrl).hostname, { loginUrl: session.config.loginUrl, timeoutMs: 8000 });
+        if (result.ok) { selected = candidate; break; }
+        this.failedProxyUrls.add(candidate.proxyUrl);
+        this.store.appendLog(sessionId, "warn", `Recovery proxy rejected: ${result.reason}`);
+      }
+    } catch {
+      this.store.appendLog(sessionId, "warn", "Login proxy recovery failed; check proxy provider availability");
+    } finally {
+      previous.busy = false;
+      if (reservedCandidate) this.recoveryProxyReservations.delete(reservedCandidate);
+      if (this.active.get(sessionId) === child && !this.stopping.has(sessionId) && !this.shuttingDown) {
+        if (selected) this.proxyAssignments.set(sessionId, selected);
+        try { child.send({ type: "login_proxy_result", requestId, proxyUrl: selected?.proxyUrl }, () => {}); } catch {}
+      }
+    }
   }
 
   _handleHuntControl(sessionId, child, msg) {
@@ -1022,6 +1068,10 @@ class WorkerPool {
 
     child.on("message", (msg) => {
       if (!msg || typeof msg !== "object") return;
+      if (msg.type === "login_proxy_request" && typeof msg.requestId === "string") {
+        void this._recoverLoginProxy(sessionId, child, msg.requestId);
+        return;
+      }
       if (msg.type === "hunt_slot_released" || msg.type === "hunt_resume_requested") {
         this._handleHuntControl(sessionId, child, msg);
         return;
@@ -1196,6 +1246,7 @@ class WorkerPool {
       const wasStopped = this.stopping.has(sessionId);
       this.monitor.remove(sessionId);
       this.active.delete(sessionId);
+      this.loginRotations.delete(sessionId);
       this.hunting.delete(sessionId);
       this.renewals.delete(sessionId);
       this.stopping.delete(sessionId);

@@ -34,6 +34,7 @@ async function checkProxyHealth(
   platformHost,
   {
     browserType = chromium,
+    loginUrl = null,
     timeoutMs = Math.max(
       2000,
       Number(process.env.PROXY_PREFLIGHT_CONNECT_TIMEOUT_MS) || 4000,
@@ -58,10 +59,13 @@ async function checkProxyHealth(
     ]);
     for (const host of targets) {
       // No applicant credentials, saved cookies, or persistent profiles enter this check.
-      await page.goto(`https://${host}/`, {
+      const response = await page.goto(loginUrl && host === platformHost ? loginUrl : `https://${host}/`, {
         waitUntil: "commit",
         timeout: timeoutMs,
       });
+      if (loginUrl && host === platformHost && (!response || response.status() >= 400)) {
+        return { ok: false, reason: `Login page rejected proxy (HTTP ${response?.status() || "unknown"})` };
+      }
     }
     return { ok: true };
   } catch (error) {

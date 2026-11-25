@@ -348,3 +348,15 @@ test('queued session Stop removes its summary entry without launching a worker',
  assert.equal(pool.monitor.records.get(user.id).phase,'queued');
  pool.stop(user.id);assert.equal(pool.monitor.records.size,0);assert.equal(pool.monitor.timer,null);
 });
+
+test('login 403 recovery chooses a different verified route and caps rotation',async(t)=>{
+ const {pool,create,children}=poolFixture(t);const user=create('recovery@example.com');
+ await pool._startSession(user.id);const child=children[0];
+ pool.proxyAssignments.set(user.id,{proxyUrl:'http://blocked.test:8080'});
+ let selected=0;
+ pool.proxy11Rotator.acquire=async()=>({proxyUrl:`http://new${++selected}.test:8080`,proxySource:'proxy11'});
+ pool.proxyHealthCheck=async(url,host,options)=>{assert.equal(options.loginUrl,'https://portal.test/login');return{ok:true}};
+ for(let i=0;i<4;i++)await pool._recoverLoginProxy(user.id,child,`request-${i}`);
+ assert.equal(selected,3);assert.equal(pool.failedProxyUrls.has('http://blocked.test:8080'),true);
+ assert.equal(child.sent[0].proxyUrl,'http://new1.test:8080');assert.equal(child.sent.at(-1).proxyUrl,undefined);
+});

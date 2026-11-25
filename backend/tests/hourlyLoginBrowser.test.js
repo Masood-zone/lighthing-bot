@@ -215,3 +215,11 @@ test("controlled portal: API initialization consumes a parsed browser search res
   assert.equal(result.source, "captured_appointments_search");
   assert.deepEqual(networkState.responses, []);
 });
+
+test("controlled portal: login HTTP 403 triggers recovery before credentials are filled", {timeout:30000}, async(t)=>{
+ const {login}=require('../main/api-worker');
+ const browser=await chromium.launch({channel:'chrome',headless:true});t.after(()=>browser.close());
+ const context=await browser.newContext();await context.route('**/*',route=>route.fulfill({status:403,contentType:'text/html',body:'403 Forbidden'}));
+ const page=await context.newPage();await assert.rejects(login(page),{code:'VISA_LOGIN_FORBIDDEN'});
+ assert.equal(await page.locator('input').count(),0);
+});

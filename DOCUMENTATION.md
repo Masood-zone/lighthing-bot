@@ -406,3 +406,9 @@ LightingBot is a full-stack visa appointment automation system that:
 5. Sends email notifications when appointments are booked
 6. Offers both web-based and standalone desktop deployment options
 7. Stores all data locally with encrypted credentials
+
+### Login-page HTTP 403 recovery
+
+When the API or DOM worker receives HTTP 403 on its initial login-page navigation, it asks the backend for a different Proxy11 route. The backend excludes the rejected route, known failed proxies, and proxies assigned to other sessions; it checks certificate trust and the configured login URL before returning a candidate. Chrome must be reopened to change its proxy. Saved portal authentication and browser storage are cleared before reopening, so login/CAPTCHA may be required again.
+
+Each live worker permits at most three proxy changes. Each selection tests at most three candidates. Unavailable, rejected, or exhausted proxies produce an explicit failure rather than an infinite refresh loop or direct retry. A different IP is not a guarantee of access: permission or platform restrictions can still return 403. Authenticated API 403 responses remain blocked for manual review; booking submissions are never replayed by this recovery. The hourly hunting deadline and account lock remain in force. Frontend files are unchanged.

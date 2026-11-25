@@ -1,4 +1,5 @@
 const { chromium } = require("playwright");
+const { requestLoginProxy, loginForbidden } = require("../src/queue/loginProxyRecovery");
 const { isCertificateError, certificateFailure } = require("../src/queue/proxyHealth");
 const {
   createHuntWindow,
@@ -428,11 +429,14 @@ async function login(page, { manual = false, huntWindow = null } = {}) {
   status("WAITING_FOR_LOGIN", "Opening visa login page");
 
   try {
-    await page.goto(CONFIG.PLATFORM_URL, {
+    const response = await page.goto(CONFIG.PLATFORM_URL, {
       waitUntil: "commit",
       timeout: timeout(CONFIG.LOGIN_NAV_TIMEOUT_MS),
     });
+    const forbidden = loginForbidden(response);
+    if (forbidden) throw forbidden;
   } catch (error) {
+    if (error.code === "VISA_LOGIN_FORBIDDEN") throw error;
     if (isCertificateError(error)) throw certificateFailure();
     status(
       "WAITING_FOR_LOGIN",
@@ -607,7 +611,7 @@ async function establishApiSession({
       log("info", `Authenticated page: ${String(auth.storageUrl || "").split("?")[0]}`);
       return auth;
     } catch (error) {
-      if (page.isClosed() || error instanceof HuntWindowExpiredError || error?.code === "VISA_TLS_CERTIFICATE_ERROR") throw error;
+      if (page.isClosed() || error instanceof HuntWindowExpiredError || ["VISA_TLS_CERTIFICATE_ERROR", "VISA_LOGIN_FORBIDDEN"].includes(error?.code)) throw error;
       if (manual && error instanceof VisaApiUnauthorizedError) {
         // A rejected token must not leave renewal stuck on a dashboard whose
         // browser state would immediately bypass the prefilled login form.
@@ -1233,8 +1237,35 @@ async function main() {
     browserAttemptedAt: 0,
   };
 
+  let rotations = 0;
+  let drainRecoveryRefresh = async () => {};
+  async function authenticate(options = {}) {
+    while (true) {
+      try {
+        return await establishApiSession({ ...options, page, context, networkState: capture.state });
+      } catch (error) {
+        if (error.code !== "VISA_LOGIN_FORBIDDEN") throw error;
+        if (rotations >= 3) throw new Error("Login remains forbidden after three proxy changes; manual review required");
+        status("LOGIN_PROXY_RECOVERY", `Login GET returned 403; requesting a different verified proxy (${++rotations}/3)`);
+        await drainRecoveryRefresh();
+        await pendingSessionSave;
+        const nextProxy = await requestLoginProxy(page);
+        await resetPortalAuthentication({ page, context, profileDir: CONFIG.PROFILE_DIR });
+        if (browser) await browser.close();
+        CONFIG.PROXY_URL = nextProxy;
+        process.env.VISA_PROXY_MODE = "auto";
+        ({ browser, context, page } = await launchBrowser());
+        capture = createNetworkCapture();
+        page.on("request", capture.rememberRequest);
+        page.on("response", capture.rememberResponse);
+        if (client) { client.context = context; client.page = page; client.auth = {}; client.networkState = capture.state; client.readTransport = "playwright"; }
+        options = { ...options, allowRestore: false };
+      }
+    }
+  }
+
   try {
-    let auth = await establishApiSession({
+    let auth = await authenticate({
       page,
       context,
       networkState: capture.state,
@@ -1274,6 +1305,7 @@ async function main() {
     });
     const scanStats = createScanStats();
     let refreshTokenInBackground = createBackgroundTokenRefresher(client);
+    drainRecoveryRefresh = () => refreshTokenInBackground.drain();
     let lastScanOutcome = "";
 
     while (!completionReported) {
@@ -1298,7 +1330,7 @@ async function main() {
         client.context = context;
         client.page = page;
         client.networkState = capture.state;
-        auth = await establishApiSession({ page, context, networkState: capture.state, manual: true });
+        auth = await authenticate({ manual: true });
         client.auth = auth;
         // Authentication alone does not authorize hunting: the parent must
         // grant FIFO admission to this same worker.
@@ -1406,7 +1438,7 @@ async function main() {
 
         if (error instanceof VisaApiUnauthorizedError) {
           status("REAUTHENTICATION_REQUIRED", "Manual reauthentication required");
-          auth = await establishApiSession({
+          auth = await authenticate({
             page,
             context,
             networkState: capture.state,

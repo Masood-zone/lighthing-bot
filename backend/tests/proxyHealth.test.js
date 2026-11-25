@@ -115,3 +115,10 @@ test("API login terminates on a certificate error rather than waiting or retryin
   );
   assert.equal(navigations, 1);
 });
+
+test('recovery health checks reject HTTP 403 on the exact login path',async()=>{
+ let closed=false;const urls=[];
+ const browserType={launch:async()=>({newContext:async()=>({newPage:async()=>({goto:async(url)=>{urls.push(url);return{status:()=>403}}})}),close:async()=>{closed=true}})};
+ const result=await checkProxyHealth('http://proxy.test:8080','portal.test',{browserType,loginUrl:'https://portal.test/visaapplicantui/login'});
+ assert.equal(result.ok,false);assert.match(result.reason,/HTTP 403/);assert.equal(urls[0],'https://portal.test/visaapplicantui/login');assert.equal(closed,true);
+});

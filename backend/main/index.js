@@ -1,4 +1,6 @@
 const { chromium } = require("playwright");
+const { requestLoginProxy, loginForbidden } = require("../src/queue/loginProxyRecovery");
+const { resetPortalAuthentication } = require("./api-worker");
 const { createPerfTracer } = require("../src/perfTrace");
 
 try {
@@ -743,7 +745,7 @@ async function loginWithRetry(page) {
       await login(page);
       return;
     } catch (error) {
-      if (page.isClosed()) throw error;
+      if (page.isClosed() || error.code === "VISA_LOGIN_FORBIDDEN") throw error;
       status(
         "LOGIN_RETRY",
         `Login attempt ${attempt} failed (${error?.message || String(error)}); retrying without closing the session`,
@@ -761,11 +763,14 @@ async function login(page) {
   );
 
   try {
-    await page.goto(CONFIG.PLATFORM_URL, {
+    const response = await page.goto(CONFIG.PLATFORM_URL, {
       waitUntil: "commit",
       timeout: CONFIG.LOGIN_NAV_TIMEOUT_MS,
     });
+    const forbidden = loginForbidden(response);
+    if (forbidden) throw forbidden;
   } catch (error) {
+    if (error.code === "VISA_LOGIN_FORBIDDEN") throw error;
     status(
       "LOGIN",
       `Login page is loading slowly; keeping the worker alive and waiting (${String(error?.message || error)})`,
@@ -3193,11 +3198,23 @@ async function attemptBooking(page) {
 
 async function main() {
   status("START", "Launching fast Playwright worker");
-  const { browser, context, page } = await launchBrowser();
+  let { browser, context, page } = await launchBrowser();
   let completionReported = false;
 
   try {
-    await loginWithRetry(page);
+    for (let rotations = 0; ; rotations++) {
+      try { await loginWithRetry(page); break; }
+      catch (error) {
+        if (error.code !== "VISA_LOGIN_FORBIDDEN") throw error;
+        if (rotations >= 3) throw new Error("Login remains forbidden after three proxy changes; manual review required");
+        status("LOGIN_PROXY_RECOVERY", `Login GET returned 403; requesting another verified proxy (${rotations + 1}/3)`);
+        const nextProxy = await requestLoginProxy(page);
+        await resetPortalAuthentication({ page, context, profileDir: CONFIG.PROFILE_DIR });
+        if (browser) await browser.close();
+        CONFIG.PROXY_URL = nextProxy;
+        ({ browser, context, page } = await launchBrowser());
+      }
+    }
 
     while (true) {
       const result = await attemptBooking(page).catch((error) => {
