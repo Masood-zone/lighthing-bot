@@ -1,0 +1,55 @@
+[package]
+name = "lightning-bot-api"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "lightning-bot-api"
+path = "src/main.rs"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["macros"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Tower middleware (CORS, tracing, etc.)
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace", "timeout"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Auth / JWT
+jsonwebtoken = "9"
+
+# Password hashing
+bcrypt = "0.15"
+
+# HTTP client (for forwarding requests to visa API, etc.)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Config / env
+dotenvy = "0.15"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# UUIDs
+uuid = { version = "1", features = ["v4"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
